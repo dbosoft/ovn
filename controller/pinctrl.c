@@ -1225,7 +1225,7 @@ fill_ipv6_prefix_state(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 pfd->prefix = in6addr_any;
             }
         } else if (pfd->state == PREFIX_PENDING && ovnsb_idl_txn) {
-            char prefix_str[INET6_ADDRSTRLEN + 1] = {};
+            char prefix_str[INET6_ADDRSTRLEN + 1] = {0};
             struct smap options;
 
             pfd->state = PREFIX_DONE;
@@ -3648,7 +3648,7 @@ static void
 packet_put_ra_dnssl_opt(struct dp_packet *b, ovs_be32 lifetime,
                         char *dnssl_data)
 {
-    char *dnssl_list, *t0, *r0 = NULL, dnssl[255] = {};
+    char *dnssl_list, *t0, *r0 = NULL, dnssl[255] = {0};
     size_t prev_l4_size = dp_packet_l4_size(b);
     size_t size = sizeof(struct ovs_nd_dnssl);
     int i = 0;
