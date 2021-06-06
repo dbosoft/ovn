@@ -22,6 +22,8 @@ AM_LDFLAGS += $(OVS_LDFLAGS)
 AM_CPPFLAGS += -I $(top_srcdir)/include
 
 if WIN32
+AM_CPPFLAGS += -I $(OVS_SRCDIR)/include/windows
+AM_CPPFLAGS += -I $(OVS_SRCDIR)/datapath-windows/include
 AM_CPPFLAGS += $(PTHREAD_INCLUDES)
 AM_CPPFLAGS += $(MSVC_CFLAGS)
 AM_LDFLAGS += $(PTHREAD_LDFLAGS)
@@ -68,7 +70,7 @@ endif
 # foo/__init__.py into an (older) version with plain foo.py, since
 # foo/__init__.pyc will cause Python to ignore foo.py.
 run_python = \
-	PYTHONPATH=$(OVS_SRCDIR)/python$(psep)$$PYTHONPATH \
+	PYTHONPATH=$$PYTHONPATH \
 	PYTHONDONTWRITEBYTECODE=yes $(PYTHON3)
 
 ALL_LOCAL =
