@@ -904,12 +904,21 @@ enum sb_engine_node {
     SB_NODES
 #undef SB_NODE
 
+
+/* macro interface is already defined in Windows headers,
+   undef until end of file for OVS_NODE */
+#ifdef _WIN32    
+    #pragma push_macro("interface")
+    #undef interface
+#endif
+
 #define OVS_NODES \
     OVS_NODE(open_vswitch, "open_vswitch") \
     OVS_NODE(bridge, "bridge") \
     OVS_NODE(port, "port") \
     OVS_NODE(interface, "interface") \
     OVS_NODE(qos, "qos")
+  
 
 enum ovs_engine_node {
 #define OVS_NODE(NAME, NAME_STR) OVS_##NAME,
@@ -920,6 +929,7 @@ enum ovs_engine_node {
 #define OVS_NODE(NAME, NAME_STR) ENGINE_FUNC_OVS(NAME);
     OVS_NODES
 #undef OVS_NODE
+
 
 struct ed_type_ofctrl_is_connected {
     bool connected;
@@ -3589,3 +3599,9 @@ debug_dump_local_bindings(struct unixctl_conn *conn, int argc OVS_UNUSED,
     unixctl_command_reply(conn, ds_cstr(&binding_data));
     ds_destroy(&binding_data);
 }
+
+
+/* restore macro interface from Windows headers*/
+#ifdef _WIN32    
+    #pragma pop_macro("interface")
+#endif
