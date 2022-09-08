@@ -94,3 +94,5 @@ testsuite.tmp.orig
 /.venv
 /cxx-check
 /*.ovsschema.stamp
+
+PTHREADS-BUILT
