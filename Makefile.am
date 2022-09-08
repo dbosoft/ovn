@@ -22,6 +22,8 @@ AM_LDFLAGS += $(OVS_LDFLAGS)
 AM_CPPFLAGS += -I $(top_srcdir)/include
 
 if WIN32
+AM_CPPFLAGS += -I $(OVS_SRCDIR)/include/windows
+AM_CPPFLAGS += -I $(OVS_SRCDIR)/datapath-windows/include
 AM_CPPFLAGS += $(PTHREAD_INCLUDES)
 AM_CPPFLAGS += $(MSVC_CFLAGS)
 AM_LDFLAGS += $(PTHREAD_LDFLAGS)
