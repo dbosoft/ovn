@@ -1,4 +1,4 @@
 [submodule "ovs"]
 	path = ovs
 	url = https://github.com/dbosoft/ovs.git
-	branch = pull/winbuild
+	branch = dbosoft-master
