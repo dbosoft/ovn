@@ -998,6 +998,15 @@ enum sb_engine_node {
     SB_NODES
 #undef SB_NODE
 
+
+/* macro interface is already defined in Windows headers,
+   undef until end of file for OVS_NODE */
+#ifdef _WIN32    
+    #pragma push_macro("interface")
+    #undef interface
+#endif
+
+
 #define OVS_NODES \
     OVS_NODE(open_vswitch, "open_vswitch") \
     OVS_NODE(bridge, "bridge") \
@@ -4813,3 +4822,8 @@ debug_ignore_startup_delay(struct unixctl_conn *conn, int argc OVS_UNUSED,
     daemon_started_recently_ignore();
     unixctl_command_reply(conn, NULL);
 }
+
+/* restore macro interface from Windows headers*/
+#ifdef _WIN32    
+    #pragma pop_macro("interface")
+#endif

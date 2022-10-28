@@ -5059,7 +5059,12 @@ lflow_hash_lock_destroy(void)
  * threads are collected to fix the lflow hmap's size (by the function
  * fix_flow_map_size()).
  * */
+
+#ifdef _WIN32    
+static __declspec(thread) size_t thread_lflow_counter = 0;
+#else
 static thread_local size_t thread_lflow_counter = 0;
+#endif
 
 /* Adds a row with the specified contents to the Logical_Flow table.
  * Version to use when hash bucket locking is NOT required.
