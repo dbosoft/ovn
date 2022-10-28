@@ -5468,7 +5468,188 @@ int parallelization_state = STATE_NULL;
  * threads are collected to fix the lflow hmap's size (by the function
  * fix_flow_map_size()).
  * */
-thread_local size_t thread_lflow_counter = 0;
+
+#ifdef _WIN32    
+static __declspec(thread) size_t thread_lflow_counter = 0;
+#else
+static thread_local size_t thread_lflow_counter = 0;
+#endif
+
+/* Adds a row with the specified contents to the Logical_Flow table.
+ * Version to use when hash bucket locking is NOT required.
+ */
+static struct ovn_lflow *
+do_ovn_lflow_add(struct hmap *lflow_map, struct ovn_datapath *od,
+                 uint32_t hash, enum ovn_stage stage, uint16_t priority,
+                 const char *match, const char *actions, const char *io_port,
+                 const struct ovsdb_idl_row *stage_hint,
+                 const char *where, const char *ctrl_meter)
+{
+
+    struct ovn_lflow *old_lflow;
+    struct ovn_lflow *lflow;
+
+    old_lflow = ovn_lflow_find(lflow_map, NULL, stage, priority, match,
+                               actions, ctrl_meter, hash);
+    if (old_lflow) {
+        ovn_dp_group_add_with_reference(old_lflow, od);
+        return old_lflow;
+    }
+
+    lflow = xmalloc(sizeof *lflow);
+    /* While adding new logical flows we're not setting single datapath, but
+     * collecting a group.  'od' will be updated later for all flows with only
+     * one datapath in a group, so it could be hashed correctly. */
+    ovn_lflow_init(lflow, NULL, stage, priority,
+                   xstrdup(match), xstrdup(actions),
+                   io_port ? xstrdup(io_port) : NULL,
+                   nullable_xstrdup(ctrl_meter),
+                   ovn_lflow_hint(stage_hint), where);
+    bitmap_set1(lflow->dpg_bitmap, od->index);
+    if (parallelization_state != STATE_USE_PARALLELIZATION) {
+        hmap_insert(lflow_map, &lflow->hmap_node, hash);
+    } else {
+        hmap_insert_fast(lflow_map, &lflow->hmap_node, hash);
+        thread_lflow_counter++;
+    }
+    return lflow;
+}
+
+/* Adds a row with the specified contents to the Logical_Flow table.
+ * Version to use when hash bucket locking IS required.
+ */
+static struct ovn_lflow *
+do_ovn_lflow_add_pd(struct hmap *lflow_map, struct ovn_datapath *od,
+                    uint32_t hash, enum ovn_stage stage, uint16_t priority,
+                    const char *match, const char *actions,
+                    const char *io_port,
+                    const struct ovsdb_idl_row *stage_hint,
+                    const char *where, const char *ctrl_meter)
+{
+
+    struct ovn_lflow *lflow;
+    struct ovs_mutex *hash_lock =
+        &lflow_hash_locks[hash & lflow_map->mask & LFLOW_HASH_LOCK_MASK];
+
+    ovs_mutex_lock(hash_lock);
+    lflow = do_ovn_lflow_add(lflow_map, od, hash, stage, priority, match,
+                             actions, io_port, stage_hint, where, ctrl_meter);
+    ovs_mutex_unlock(hash_lock);
+    return lflow;
+}
+
+static struct ovn_lflow *
+ovn_lflow_add_at_with_hash(struct hmap *lflow_map, struct ovn_datapath *od,
+                           enum ovn_stage stage, uint16_t priority,
+                           const char *match, const char *actions,
+                           const char *io_port, const char *ctrl_meter,
+                           const struct ovsdb_idl_row *stage_hint,
+                           const char *where, uint32_t hash)
+{
+    struct ovn_lflow *lflow;
+
+    ovs_assert(ovn_stage_to_datapath_type(stage) == ovn_datapath_get_type(od));
+    if (parallelization_state == STATE_USE_PARALLELIZATION) {
+        lflow = do_ovn_lflow_add_pd(lflow_map, od, hash, stage, priority,
+                                    match, actions, io_port, stage_hint, where,
+                                    ctrl_meter);
+    } else {
+        lflow = do_ovn_lflow_add(lflow_map, od, hash, stage, priority, match,
+                         actions, io_port, stage_hint, where, ctrl_meter);
+    }
+    return lflow;
+}
+
+/* Adds a row with the specified contents to the Logical_Flow table. */
+static void
+ovn_lflow_add_at(struct hmap *lflow_map, struct ovn_datapath *od,
+                 enum ovn_stage stage, uint16_t priority,
+                 const char *match, const char *actions, const char *io_port,
+                 const char *ctrl_meter,
+                 const struct ovsdb_idl_row *stage_hint, const char *where)
+{
+    uint32_t hash;
+
+    hash = ovn_logical_flow_hash(ovn_stage_get_table(stage),
+                                 ovn_stage_get_pipeline(stage),
+                                 priority, match,
+                                 actions);
+    ovn_lflow_add_at_with_hash(lflow_map, od, stage, priority, match, actions,
+                               io_port, ctrl_meter, stage_hint, where, hash);
+}
+
+/* Adds a row with the specified contents to the Logical_Flow table. */
+#define ovn_lflow_add_with_hint__(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, \
+                                  ACTIONS, IN_OUT_PORT, CTRL_METER, \
+                                  STAGE_HINT) \
+    ovn_lflow_add_at(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS, \
+                     IN_OUT_PORT, CTRL_METER, STAGE_HINT, OVS_SOURCE_LOCATOR)
+
+#define ovn_lflow_add_with_hint(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, \
+                                ACTIONS, STAGE_HINT) \
+    ovn_lflow_add_at(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS, \
+                     NULL, NULL, STAGE_HINT, OVS_SOURCE_LOCATOR)
+
+/* This macro is similar to ovn_lflow_add_with_hint, except that it requires
+ * the IN_OUT_PORT argument, which tells the lport name that appears in the
+ * MATCH, which helps ovn-controller to bypass lflows parsing when the lport is
+ * not local to the chassis. The critiera of the lport to be added using this
+ * argument:
+ *
+ * - For ingress pipeline, the lport that is used to match "inport".
+ * - For egress pipeline, the lport that is used to match "outport".
+ *
+ * For now, only LS pipelines should use this macro.  */
+#define ovn_lflow_add_with_lport_and_hint(LFLOW_MAP, OD, STAGE, PRIORITY, \
+                                          MATCH, ACTIONS, IN_OUT_PORT, \
+                                          STAGE_HINT) \
+    ovn_lflow_add_at(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS, \
+                     IN_OUT_PORT, NULL, STAGE_HINT, OVS_SOURCE_LOCATOR)
+
+#define ovn_lflow_add(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS) \
+    ovn_lflow_add_at(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS, \
+                     NULL, NULL, NULL, OVS_SOURCE_LOCATOR)
+
+#define ovn_lflow_metered(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS, \
+                          CTRL_METER) \
+    ovn_lflow_add_with_hint__(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, \
+                              ACTIONS, NULL, CTRL_METER, NULL)
+
+static struct ovn_lflow *
+ovn_lflow_find(const struct hmap *lflows, const struct ovn_datapath *od,
+               enum ovn_stage stage, uint16_t priority,
+               const char *match, const char *actions, const char *ctrl_meter,
+               uint32_t hash)
+{
+    struct ovn_lflow *lflow;
+    HMAP_FOR_EACH_WITH_HASH (lflow, hmap_node, hash, lflows) {
+        if (ovn_lflow_equal(lflow, od, stage, priority, match, actions,
+                            ctrl_meter)) {
+            return lflow;
+        }
+    }
+    return NULL;
+}
+
+static void
+ovn_lflow_destroy(struct hmap *lflows, struct ovn_lflow *lflow)
+{
+    if (lflow) {
+        if (parallelization_state != STATE_NULL) {
+            ovs_mutex_destroy(&lflow->dpg_lock);
+        }
+        if (lflows) {
+            hmap_remove(lflows, &lflow->hmap_node);
+        }
+        bitmap_free(lflow->dpg_bitmap);
+        free(lflow->match);
+        free(lflow->actions);
+        free(lflow->io_port);
+        free(lflow->stage_hint);
+        free(lflow->ctrl_meter);
+        free(lflow);
+    }
+}
 
 static bool
 build_dhcpv4_action(struct ovn_port *op, ovs_be32 offer_ip,
