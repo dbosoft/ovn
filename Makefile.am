@@ -104,6 +104,7 @@ EXTRA_DIST = \
 	.github/workflows/ovn-kubernetes.yml \
 	.github/workflows/ovn-fake-multinode-tests.yml \
 	.readthedocs.yaml \
+	.github/workflows/build-windows.yml \
 	boot.sh \
 	$(MAN_FRAGMENTS) \
 	$(MAN_ROOTS) \

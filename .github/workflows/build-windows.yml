@@ -113,11 +113,13 @@ jobs:
           source ~/.pythonenv.sh
           pushd ovs
           make install
+          cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
+          cp ./PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
           popd
           make install
 
       - name: upload build artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: artifacts-windows--${{ join(matrix.*, '-') }}
+          name: openvswitch-windows--${{ join(matrix.*, '-') }}
           path: c:\openvswitch
