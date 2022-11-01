@@ -3,15 +3,29 @@
 set -o errexit
 set -x
 
-CFLAGS_FOR_OVN="-g -O2"
+COMMON_CFLAGS="-g -O2"
+OVN_CFLAGS=""
 EXTRA_OPTS="--with-pthread=`realpath ./ovs/PTHREADS-BUILT | xargs cygpath -m`"
 
-function configure_ovn()
+
+function configure_ovs()
 {
+    pushd ovs
     ./boot.sh
     ./configure CC="./build-aux/cccl" LD="`which link`" \
     LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
-    CFLAGS="${CFLAGS_FOR_OVN}" $* || { cat config.log; exit 1; }
+    CFLAGS="${COMMON_CFLAGS}" $* || { cat config.log; exit 1; }
+    make -j || { cat config.log; exit 1; }
+    popd
+}
+
+function configure_ovn()
+{
+    configure_ovs $*
+    ./boot.sh
+    ./configure CC="./build-aux/cccl" LD="`which link`" \
+    LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
+    CFLAGS="${COMMON_CFLAGS} ${OVN_CFLAGS}" $* || { cat config.log; exit 1; }
 }
 
 
