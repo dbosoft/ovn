@@ -224,7 +224,7 @@ char *str_tolower(const char *orig);
         {"detach",            no_argument, NULL, OVN_OPT_DETACH},            \
         {"no-self-confinement", no_argument, NULL, OVN_OPT_NO_SELF_CONFINEMENT}, \
         {"no-chdir",          no_argument, NULL, OVN_OPT_NO_CHDIR},          \
-        {"pidfile",           optional_argument, OVN_NULL, OPT_PIDFILE},     \
+        {"pidfile",           optional_argument, NULL, OPT_PIDFILE},     \
         {"overwrite-pidfile", no_argument, NULL, OVN_OPT_OVERWRITE_PIDFILE}, \
         {"monitor",           no_argument, NULL, OVN_OPT_MONITOR},           \
         {"user",              required_argument, NULL,OVN_OPT_USER_GROUP}
