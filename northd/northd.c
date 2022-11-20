@@ -883,6 +883,7 @@ ovn_datapath_destroy(struct hmap *datapaths, struct ovn_datapath *od)
         ovn_destroy_tnlids(&od->port_tnlids);
         destroy_ipam_info(&od->ipam_info);
         free(od->router_ports);
+        free(od->ls_peers);
         destroy_nat_entries(od);
         destroy_router_external_ips(od);
         destroy_lb_for_datapath(od);
@@ -964,6 +965,16 @@ ovn_datapath_add_router_port(struct ovn_datapath *od, struct ovn_port *op)
                                       sizeof *od->router_ports);
     }
     od->router_ports[od->n_router_ports++] = op;
+}
+
+static void
+ovn_datapath_add_ls_peer(struct ovn_datapath *od, struct ovn_datapath *peer)
+{
+    if (od->n_ls_peers == od->n_allocated_ls_peers) {
+        od->ls_peers = x2nrealloc(od->ls_peers, &od->n_allocated_ls_peers,
+                                  sizeof *od->ls_peers);
+    }
+    od->ls_peers[od->n_ls_peers++] = peer;
 }
 
 static bool
@@ -2690,6 +2701,7 @@ join_logical_ports(struct northd_input *input_data,
             }
 
             ovn_datapath_add_router_port(op->od, op);
+            ovn_datapath_add_ls_peer(peer->od, op->od);
             peer->peer = op;
             op->peer = peer;
 
@@ -3914,7 +3926,7 @@ build_lbs(struct northd_input *input_data, struct hmap *datapaths,
             nbrec_lb_group = od->nbs->load_balancer_group[i];
             lb_group = ovn_lb_group_find(lb_groups,
                                          &nbrec_lb_group->header_.uuid);
-            ovn_lb_group_add_ls(lb_group, od);
+            ovn_lb_group_add_ls(lb_group, 1, &od);
         }
     }
 
@@ -4122,49 +4134,28 @@ build_lrouter_lbs_reachable_ips(struct hmap *datapaths, struct hmap *lbs,
 }
 
 static void
-build_lswitch_lbs_from_lrouter(struct hmap *datapaths, struct hmap *lbs)
+build_lswitch_lbs_from_lrouter(struct hmap *lbs, struct hmap *lb_groups)
 {
     if (!install_ls_lb_from_router) {
         return;
     }
 
-    struct ovn_datapath *od;
-    HMAP_FOR_EACH (od, key_node, datapaths) {
-        if (!od->nbs) {
-            continue;
+    struct ovn_northd_lb *lb;
+    HMAP_FOR_EACH (lb, hmap_node, lbs) {
+        for (size_t i = 0; i < lb->n_nb_lr; i++) {
+            struct ovn_datapath *od = lb->nb_lr[i];
+            ovn_northd_lb_add_ls(lb, od->n_ls_peers, od->ls_peers);
         }
+    }
 
-        struct ovn_port *op;
-        LIST_FOR_EACH (op, dp_node, &od->port_list) {
-            if (!lsp_is_router(op->nbsp)) {
-                continue;
-            }
-            if (!op->peer) {
-                continue;
-            }
-
-            struct ovn_datapath *peer_od = op->peer->od;
-            for (size_t i = 0; i < peer_od->nbr->n_load_balancer; i++) {
-                bool installed = false;
-                const struct uuid *lb_uuid =
-                    &peer_od->nbr->load_balancer[i]->header_.uuid;
-                struct ovn_northd_lb *lb = ovn_northd_lb_find(lbs, lb_uuid);
-                if (!lb) {
-                    continue;
-                }
-
-                for (size_t j = 0; j < lb->n_nb_ls; j++) {
-                   if (lb->nb_ls[j] == od) {
-                       installed = true;
-                       break;
-                   }
-                }
-                if (!installed) {
-                    ovn_northd_lb_add_ls(lb, 1, &od);
-                }
-                if (lb->nlb) {
-                    od->has_lb_vip |= lb_has_vip(lb->nlb);
-                }
+    struct ovn_lb_group *lb_group;
+    HMAP_FOR_EACH (lb_group, hmap_node, lb_groups) {
+        for (size_t i = 0; i < lb_group->n_lr; i++) {
+            struct ovn_datapath *od = lb_group->lr[i];
+            ovn_lb_group_add_ls(lb_group, od->n_ls_peers, od->ls_peers);
+            for (size_t j = 0; j < lb_group->n_lbs; j++) {
+                ovn_northd_lb_add_ls(lb_group->lbs[j], od->n_ls_peers,
+                                     od->ls_peers);
             }
         }
     }
@@ -4183,7 +4174,7 @@ build_lb_port_related_data(struct hmap *datapaths, struct hmap *ports,
     build_lrouter_lbs_check(datapaths);
     build_lrouter_lbs_reachable_ips(datapaths, lbs, lb_groups);
     build_lb_svcs(input_data, ovnsb_txn, ports, lbs);
-    build_lswitch_lbs_from_lrouter(datapaths, lbs);
+    build_lswitch_lbs_from_lrouter(lbs, lb_groups);
 }
 
 
@@ -7350,8 +7341,8 @@ build_lrouter_groups(struct hmap *ports, struct ovs_list *lr_list)
 }
 
 /*
- * Ingress table 24: Flows that flood self originated ARP/ND packets in the
- * switching domain.
+ * Ingress table 24: Flows that flood self originated ARP/RARP/ND packets in
+ * the switching domain.
  */
 static void
 build_lswitch_rport_arp_req_self_orig_flow(struct ovn_port *op,
@@ -7383,7 +7374,7 @@ build_lswitch_rport_arp_req_self_orig_flow(struct ovn_port *op,
         sset_add(&all_eth_addrs, nat->external_mac);
     }
 
-    /* Self originated ARP requests/ND need to be flooded to the L2 domain
+    /* Self originated ARP requests/RARP/ND need to be flooded to the L2 domain
      * (except on router ports).  Determine that packets are self originated
      * by also matching on source MAC. Matching on ingress port is not
      * reliable in case this is a VLAN-backed network.
@@ -7399,7 +7390,8 @@ build_lswitch_rport_arp_req_self_orig_flow(struct ovn_port *op,
     ds_chomp(&eth_src, ',');
     ds_put_cstr(&eth_src, "}");
 
-    ds_put_format(&match, "eth.src == %s && (arp.op == 1 || nd_ns)",
+    ds_put_format(&match,
+                  "eth.src == %s && (arp.op == 1 || rarp.op == 3 || nd_ns)",
                   ds_cstr(&eth_src));
     ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, priority, ds_cstr(&match),
                   "outport = \""MC_FLOOD_L2"\"; output;");
@@ -7595,7 +7587,7 @@ build_lswitch_rport_arp_req_flows(struct ovn_port *op,
             lflows, stage_hint);
     }
 
-    /* Self originated ARP requests/ND need to be flooded as usual.
+    /* Self originated ARP requests/RARP/ND need to be flooded as usual.
      *
      * However, if the switch doesn't have any non-router ports we shouldn't
      * even try to flood.
