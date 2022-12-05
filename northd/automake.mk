@@ -1,6 +1,8 @@
 # ovn-northd
 bin_PROGRAMS += northd/ovn-northd
 northd_ovn_northd_SOURCES = \
+	northd/debug.c \
+	northd/debug.h \
 	northd/mac-binding-aging.c \
 	northd/mac-binding-aging.h \
 	northd/northd.c \
@@ -10,6 +12,10 @@ northd_ovn_northd_SOURCES = \
 	northd/en-northd.h \
 	northd/en-lflow.c \
 	northd/en-lflow.h \
+	northd/en-northd-output.c \
+	northd/en-northd-output.h \
+	northd/en-sync-sb.c \
+	northd/en-sync-sb.h \
 	northd/inc-proc-northd.c \
 	northd/inc-proc-northd.h \
 	northd/ipam.c \

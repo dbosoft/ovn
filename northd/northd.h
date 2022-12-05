@@ -31,11 +31,12 @@ struct northd_input {
     const struct nbrec_load_balancer_group_table
         *nbrec_load_balancer_group_table;
     const struct nbrec_port_group_table *nbrec_port_group_table;
-    const struct nbrec_address_set_table *nbrec_address_set_table;
     const struct nbrec_meter_table *nbrec_meter_table;
     const struct nbrec_acl_table *nbrec_acl_table;
     const struct nbrec_static_mac_binding_table
         *nbrec_static_mac_binding_table;
+    const struct nbrec_chassis_template_var_table
+        *nbrec_chassis_template_var_table;
 
     /* Southbound table references */
     const struct sbrec_sb_global_table *sbrec_sb_global_table;
@@ -47,7 +48,6 @@ struct northd_input {
     const struct sbrec_fdb_table *sbrec_fdb_table;
     const struct sbrec_load_balancer_table *sbrec_load_balancer_table;
     const struct sbrec_service_monitor_table *sbrec_service_monitor_table;
-    const struct sbrec_address_set_table *sbrec_address_set_table;
     const struct sbrec_port_group_table *sbrec_port_group_table;
     const struct sbrec_meter_table *sbrec_meter_table;
     const struct sbrec_dns_table *sbrec_dns_table;
@@ -55,6 +55,8 @@ struct northd_input {
     const struct sbrec_chassis_private_table *sbrec_chassis_private_table;
     const struct sbrec_static_mac_binding_table
         *sbrec_static_mac_binding_table;
+    const struct sbrec_chassis_template_var_table
+        *sbrec_chassis_template_var_table;
 
     /* Indexes */
     struct ovsdb_idl_index *sbrec_chassis_by_name;
@@ -281,4 +283,5 @@ void bfd_cleanup_connections(struct lflow_input *input_data,
                              struct hmap *bfd_map);
 void run_update_worker_pool(int n_threads);
 
+const char *northd_get_svc_monitor_mac(void);
 #endif /* NORTHD_H */

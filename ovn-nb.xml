@@ -264,6 +264,34 @@
         </p>
       </column>
 
+      <column name="options" key="debug_drop_domain_id">
+        <p>
+          If set to a 8-bit number and if
+          <code>debug_drop_collector_set</code> is also configured,
+          <code>ovn-northd</code> will add a <code>sample</code> action to
+          every logical flow that contains a 'drop' action.
+          The 8 most significant bits of the observation_domain_id field will
+          be those specified in the
+          <code> debug_drop_domain_id</code>.
+          The 24 least significant bits of the observation_domain_id field will
+          be the datapath's key.
+        </p>
+        <p>
+          The observation_point_id will be set to the first 32 bits of the
+          logical flow's UUID.
+        </p>
+      </column>
+
+      <column name="options" key="debug_drop_collector_set">
+        <p>
+          If set to a 32-bit number <code>ovn-northd</code> will add a
+          <code>sample</code> action to every logical flow that contains a
+          'drop' action. The sample action will have the specified
+          collector_set_id. The value must match that of the local OVS
+          configuration as described in <code>ovs-actions</code>(7).
+        </p>
+      </column>
+
       <group title="Options for configuring interconnection route advertisement">
         <p>
           These options control how routes are advertised between OVN
@@ -1905,8 +1933,76 @@
         is applied reply to ARP/neighbor discovery requests for all VIPs
         of the load balancer.  If set to <code>reachable</code>, then routers
         on which the load balancer is applied reply to ARP/neighbor discovery
-        requests only for VIPs that are part of a router's subnet.  The default
-        value of this option, if not specified, is <code>reachable</code>.
+        requests only for VIPs that are part of a router's subnet.  If set to
+        <code>none</code>, then routers on which the load balancer is applied
+        never reply to ARP/neighbor discovery requests for any of the load
+        balancer VIPs. Load balancers with <code>options:template=true</code>
+        do not support <code>reachable</code> as a valid mode.  The default
+        value of this option, if not specified, is <code>reachable</code> for
+        regular load balancers and <code>none</code> for template load
+        balancers.
+      </column>
+
+      <column name="options" key="template">
+        <p>
+          Option to be set to <code>true</code>, if the load balancer is a
+          template.  The load balancer VIPs and backends must be using
+          <ref table="Chassis_Template_Var"/> in their definitions.
+        </p>
+
+        <p>
+          Load balancer template VIP supported formats are:
+        </p>
+        <pre>
+^VIP_VAR[:^PORT_VAR|:port]
+        </pre>
+
+        <p>
+          where <code>VIP_VAR</code> and <code>PORT_VAR</code> are keys of
+          the <ref table="Chassis_Template_Var"/> <ref column="variables"/>
+          records.
+        </p>
+
+        <p>
+          Note: The VIP and PORT cannot be combined into a single template
+          variable. For example, a <ref table="Chassis_Template_Var"/>
+          variable expanding to <code>10.0.0.1:8080</code> is not valid
+          if used as VIP.
+        </p>
+
+        <p>
+          Load balancer template backend supported formats are:
+        </p>
+        <pre>
+^BACKEND_VAR1[:^PORT_VAR1|:port],^BACKEND_VAR2[:^PORT_VAR2|:port]
+
+or
+
+^BACKENDS_VAR1,^BACKENDS_VAR2
+        </pre>
+        <p>
+          where <code>BACKEND_VAR1</code>, <code>PORT_VAR1</code>,
+          <code>BACKEND_VAR2</code>, <code>PORT_VAR2</code>,
+          <code>BACKENDS_VAR1</code> and <code>BACKENDS_VAR2</code> are keys
+          of the <ref table="Chassis_Template_Var"/> <ref column="variables"/>
+          records.
+        </p>
+      </column>
+
+      <column name="options" key="address-family">
+        Address family used by the load balancer.  Supported values are
+        <code>ipv4</code> and <code>ipv6</code>.  The address-family is
+        only used for load balancers with <code>options:template=true</code>.
+        For explicit load balancers, setting the address-family has no
+        effect.
+      </column>
+
+      <column name="options" key="affinity_timeout">
+        If the CMS provides a positive value (in seconds) for
+        <code>affinity_timeout</code>, OVN will dnat connections received
+        from the same client to this lb to the same backend if received in
+        the affinity timeslot. Max supported affinity_timeout is 65535
+        seconds.
       </column>
     </group>
   </table>
@@ -4433,6 +4529,40 @@
 
       <column name="override_dynamic_mac">
         Override dynamically learnt MACs.
+      </column>
+    </group>
+  </table>
+
+  <table name="Chassis_Template_Var">
+    <p>
+      One record per chassis, each containing a map, <code>variables</code>,
+      between template variable names and their value for that specific
+      chassis.  A template variable has a name and potentially different
+      values on different hypervisors in the OVN cluster.  For example,
+      two rows, <code>R1 = (.chassis=C1, variables={(N: V1)}</code> and
+      <code>R2 = (.chassis=C2, variables={(N: V2)}</code> will make
+      <code>ovn-controller</code> running on chassis <code>C1</code> and
+      <code>C2</code> interpret the token <code>N</code> either as
+      <code>V1</code> (on <code>C1</code>) or as <code>V2</code> (on
+      <code>C2</code>).  Users can refer to template variables from
+      within other logical components, e.g., within ACL, QoS or
+      Logical_Router_Policy matches or from Load_Balancer VIP and
+      backend definitions.
+    </p>
+    <p>
+      If a template variable is referenced on a chassis for which that
+      variable is not defined then <code>ovn-controller</code> running
+      on that chassis will just interpret it as a raw string literal.
+    </p>
+    <column name="chassis">
+      The chassis this set of variable values applies to.
+    </column>
+    <column name="variables">
+      The set of variable values for a given chassis.
+    </column>
+    <group title="Common Columns">
+      <column name="external_ids">
+        See <em>External IDs</em> at the beginning of this document.
       </column>
     </group>
   </table>

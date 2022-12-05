@@ -505,6 +505,7 @@ static struct hmap dhcp_opts;   /* Contains "struct gen_opts_map"s. */
 static struct hmap dhcpv6_opts; /* Contains "struct gen_opts_map"s. */
 static struct hmap nd_ra_opts; /* Contains "struct gen_opts_map"s. */
 static struct controller_event_options event_opts;
+static struct smap template_vars;
 
 static struct ovntrace_datapath *
 ovntrace_datapath_find_by_sb_uuid(const struct uuid *sb_uuid)
@@ -955,9 +956,13 @@ parse_lflow_for_datapath(const struct sbrec_logical_flow *sblf,
 
         char *error;
         struct expr *match;
-        match = expr_parse_string(sblf->match, &symtab, &address_sets,
-                                  &port_groups, NULL, NULL, dp->tunnel_key,
-                                  &error);
+        struct lex_str match_s = lexer_parse_template_string(sblf->match,
+                                                             &template_vars,
+                                                             NULL);
+        match = expr_parse_string(lex_str_get(&match_s), &symtab,
+                                  &address_sets, &port_groups, NULL, NULL,
+                                  dp->tunnel_key, &error);
+        lex_str_free(&match_s);
         if (error) {
             VLOG_WARN("%s: parsing expression failed (%s)",
                       sblf->match, error);
@@ -980,7 +985,11 @@ parse_lflow_for_datapath(const struct sbrec_logical_flow *sblf,
         uint64_t stub[1024 / 8];
         struct ofpbuf ovnacts = OFPBUF_STUB_INITIALIZER(stub);
         struct expr *prereqs;
-        error = ovnacts_parse_string(sblf->actions, &pp, &ovnacts, &prereqs);
+        struct lex_str actions_s =
+            lexer_parse_template_string(sblf->actions, &template_vars, NULL);
+        error = ovnacts_parse_string(lex_str_get(&actions_s), &pp, &ovnacts,
+                                     &prereqs);
+        lex_str_free(&actions_s);
         if (error) {
             VLOG_WARN("%s: parsing actions failed (%s)", sblf->actions, error);
             free(error);
@@ -1078,6 +1087,7 @@ read_gen_opts(void)
     nd_ra_opts_init(&nd_ra_opts);
 
     controller_event_opts_init(&event_opts);
+    smap_init(&template_vars);
 }
 
 static void
@@ -1466,6 +1476,7 @@ execute_load(const struct ovnact_load *load,
     const struct ovnact_encode_params ep = {
         .lookup_port = ovntrace_lookup_port,
         .aux = dp,
+        .dp_key = dp->tunnel_key,
     };
     uint64_t stub[512 / 8];
     struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(stub);
@@ -2439,6 +2450,35 @@ execute_ct_nat(const struct ovnact_ct_nat *ct_nat,
 }
 
 static void
+execute_ct_commit_nat(const struct ovnact_ct_nat *ct_nat,
+                      const struct ovntrace_datapath *dp, struct flow *uflow,
+                      enum ovnact_pipeline pipeline, struct ovs_list *super)
+{
+    struct flow ct_flow = *uflow;
+    struct ds s = DS_EMPTY_INITIALIZER;
+
+    ds_put_cstr(&s, "ct_commit_nat /* assuming no"
+                    " un-nat entry, so no change */");
+
+    /* ct(nat) implies ct(). */
+    if (!(ct_flow.ct_state & CS_TRACKED)) {
+        ct_flow.ct_state |= next_ct_state(&s);
+    }
+
+    struct ovntrace_node *node = ovntrace_node_append(
+        super, OVNTRACE_NODE_TRANSFORMATION, "%s", ds_cstr(&s));
+    ds_destroy(&s);
+
+    /* Trace the actions in the next table. */
+    trace__(dp, &ct_flow, ct_nat->ltable, pipeline, &node->subs);
+
+    /* Upon return, we will trace the actions following the ct action in the
+     * original table.  The pipeline forked, so we're using the original
+     * flow, not ct_flow. */
+}
+
+
+static void
 execute_ct_lb(const struct ovnact_ct_lb *ct_lb,
               const struct ovntrace_datapath *dp, struct flow *uflow,
               enum ovnact_pipeline pipeline, struct ovs_list *super)
@@ -3095,6 +3135,11 @@ trace_actions(const struct ovnact *ovnacts, size_t ovnacts_len,
             flow_clear_conntrack(uflow);
             break;
 
+        case OVNACT_CT_COMMIT_NAT:
+            execute_ct_commit_nat(ovnact_get_CT_COMMIT_NAT(a), dp, uflow,
+                                  pipeline, super);
+            break;
+
         case OVNACT_CLONE:
             execute_clone(ovnact_get_CLONE(a), dp, uflow, table_id, pipeline,
                           super);
@@ -3290,6 +3335,12 @@ trace_actions(const struct ovnact *ovnacts, size_t ovnacts_len,
             break;
         case OVNACT_CHK_ECMP_NH:
             break;
+        case OVNACT_COMMIT_LB_AFF:
+            break;
+        case OVNACT_CHK_LB_AFF:
+            break;
+        case OVNACT_SAMPLE:
+            break;
         }
     }
     ofpbuf_uninit(&stack);
@@ -3420,9 +3471,12 @@ trace_parse(const char *dp_s, const char *flow_s,
          *
          * First make sure that the expression parses. */
         char *error;
-        struct expr *e = expr_parse_string(flow_s, &symtab, &address_sets,
-                                           &port_groups, NULL, NULL, 0,
-                                           &error);
+        struct lex_str flow_exp_s =
+            lexer_parse_template_string(flow_s, &template_vars, NULL);
+        struct expr *e = expr_parse_string(lex_str_get(&flow_exp_s), &symtab,
+                                           &address_sets, &port_groups, NULL,
+                                           NULL, 0, &error);
+        lex_str_free(&flow_exp_s);
         if (!e) {
             return trace_parse_error(error);
         }
@@ -3447,9 +3501,12 @@ trace_parse(const char *dp_s, const char *flow_s,
         free(port_name);
     }
 
-    char *error = expr_parse_microflow(flow_s, &symtab, &address_sets,
-                                       &port_groups, ovntrace_lookup_port,
-                                       *dpp, uflow);
+    struct lex_str flow_exp_s =
+        lexer_parse_template_string(flow_s, &template_vars, NULL);
+    char *error = expr_parse_microflow(lex_str_get(&flow_exp_s), &symtab,
+                                       &address_sets, &port_groups,
+                                       ovntrace_lookup_port, *dpp, uflow);
+    lex_str_free(&flow_exp_s);
     if (error) {
         return trace_parse_error(error);
     }

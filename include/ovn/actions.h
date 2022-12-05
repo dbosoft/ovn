@@ -74,6 +74,7 @@ struct ovn_extend_table;
     OVNACT(CT_LB_MARK,        ovnact_ct_lb)           \
     OVNACT(SELECT,            ovnact_select)          \
     OVNACT(CT_CLEAR,          ovnact_null)            \
+    OVNACT(CT_COMMIT_NAT,     ovnact_ct_nat)          \
     OVNACT(CLONE,             ovnact_nest)            \
     OVNACT(ARP,               ovnact_nest)            \
     OVNACT(ICMP4,             ovnact_nest)            \
@@ -121,6 +122,9 @@ struct ovn_extend_table;
     OVNACT(COMMIT_ECMP_NH,    ovnact_commit_ecmp_nh)  \
     OVNACT(CHK_ECMP_NH_MAC,   ovnact_result)          \
     OVNACT(CHK_ECMP_NH,       ovnact_result)          \
+    OVNACT(COMMIT_LB_AFF,     ovnact_commit_lb_aff)   \
+    OVNACT(CHK_LB_AFF,        ovnact_result)          \
+    OVNACT(SAMPLE,            ovnact_sample)          \
 
 /* enum ovnact_type, with a member OVNACT_<ENUM> for each action. */
 enum OVS_PACKED_ENUM ovnact_type {
@@ -260,7 +264,7 @@ struct ovnact_ct_commit_v1 {
     ovs_be128 ct_label, ct_label_mask;
 };
 
-/* OVNACT_CT_DNAT, OVNACT_CT_SNAT. */
+/* OVNACT_CT_DNAT, OVNACT_CT_SNAT, OVNACT_CT_COMMIT_NAT. */
 struct ovnact_ct_nat {
     struct ovnact ovnact;
     int family;
@@ -274,6 +278,8 @@ struct ovnact_ct_nat {
        uint16_t port_lo;
        uint16_t port_hi;
     } port_range;
+
+    bool commit;                /* Explicit commit action. */
 
     uint8_t ltable;             /* Logical table ID of next table. */
 };
@@ -456,11 +462,37 @@ struct ovnact_lookup_fdb {
     struct expr_field dst;     /* 1-bit destination field. */
 };
 
+/* OVNACT_SAMPLE */
+struct ovnact_sample {
+    struct ovnact ovnact;
+    uint16_t probability;       /* probability over UINT16_MAX. */
+    uint8_t obs_domain_id;      /* most significant byte of the
+                                   observation domain id. The other 24 bits
+                                   will come from the datapath's tunnel key. */
+    uint32_t collector_set_id;  /* colector_set_id. */
+    uint32_t obs_point_id;      /* observation point id. */
+    bool use_cookie;            /* use cookie as obs_point_id */
+};
+
 /* OVNACT_COMMIT_ECMP_NH. */
 struct ovnact_commit_ecmp_nh {
     struct ovnact ovnact;
     bool ipv6;
     uint8_t proto;
+};
+
+/* OVNACT_COMMIT_LB_AFF. */
+struct ovnact_commit_lb_aff {
+    struct ovnact ovnact;
+
+    struct in6_addr vip;
+    uint16_t vip_port;
+    uint8_t proto;
+
+    struct in6_addr backend;
+    uint16_t backend_port;
+
+    uint16_t timeout;
 };
 
 /* Internal use by the helpers below. */
@@ -784,6 +816,9 @@ struct ovnact_encode_params {
 
     /* The logical flow uuid that drove this action. */
     struct uuid lflow_uuid;
+
+    /* The datapath key. */
+    uint32_t dp_key;
 
     /* OVN maps each logical flow table (ltable), one-to-one, onto a physical
      * OpenFlow flow table (ptable).  A number of parameters describe this

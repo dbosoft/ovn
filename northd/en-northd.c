@@ -72,14 +72,14 @@ void en_northd_run(struct engine_node *node, void *data)
         EN_OVSDB_GET(engine_get_input("NB_load_balancer_group", node));
     input_data.nbrec_port_group_table =
         EN_OVSDB_GET(engine_get_input("NB_port_group", node));
-    input_data.nbrec_address_set_table =
-        EN_OVSDB_GET(engine_get_input("NB_address_set", node));
     input_data.nbrec_meter_table =
         EN_OVSDB_GET(engine_get_input("NB_meter", node));
     input_data.nbrec_acl_table =
         EN_OVSDB_GET(engine_get_input("NB_acl", node));
     input_data.nbrec_static_mac_binding_table =
         EN_OVSDB_GET(engine_get_input("NB_static_mac_binding", node));
+    input_data.nbrec_chassis_template_var_table =
+        EN_OVSDB_GET(engine_get_input("NB_chassis_template_var", node));
 
     input_data.sbrec_sb_global_table =
         EN_OVSDB_GET(engine_get_input("SB_sb_global", node));
@@ -99,8 +99,6 @@ void en_northd_run(struct engine_node *node, void *data)
         EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
     input_data.sbrec_service_monitor_table =
         EN_OVSDB_GET(engine_get_input("SB_service_monitor", node));
-    input_data.sbrec_address_set_table =
-        EN_OVSDB_GET(engine_get_input("SB_address_set", node));
     input_data.sbrec_port_group_table =
         EN_OVSDB_GET(engine_get_input("SB_port_group", node));
     input_data.sbrec_meter_table =
@@ -113,6 +111,8 @@ void en_northd_run(struct engine_node *node, void *data)
         EN_OVSDB_GET(engine_get_input("SB_chassis_private", node));
     input_data.sbrec_static_mac_binding_table =
         EN_OVSDB_GET(engine_get_input("SB_static_mac_binding", node));
+    input_data.sbrec_chassis_template_var_table =
+        EN_OVSDB_GET(engine_get_input("SB_chassis_template_var", node));
 
     northd_run(&input_data, data,
                eng_ctx->ovnnb_idl_txn,
