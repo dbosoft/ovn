@@ -474,7 +474,9 @@
       priority-110 flow is added to skip over stateful ACLs. Multicast, IPv6
       Neighbor Discovery and MLD traffic also skips stateful ACLs. For
       "allow-stateless" ACLs, a flow is added to bypass setting the hint for
-      connection tracker processing.
+      connection tracker processing when there are stateful ACLs or LB rules;
+      <code>REGBIT_ACL_STATELESS</code> is set for traffic matching stateless
+      ACL flows.
     </p>
 
     <p>
@@ -494,8 +496,10 @@
       in ingress table <code>LB</code> and <code>Stateful</code>.  It contains
       a priority-0 flow that simply moves traffic to the next table. Moreover
       it contains two priority-110 flows to move multicast, IPv6 Neighbor
-      Discovery and MLD traffic to the next table. If load balancing rules with
-      virtual IP addresses (and ports) are configured in
+      Discovery and MLD traffic to the next table. It also contains two
+      priority-110 flows to move stateless traffic, i.e traffic for which
+      <code>REGBIT_ACL_STATELESS</code> is set, to the next table. If load
+      balancing rules with virtual IP addresses (and ports) are configured in
       <code>OVN_Northbound</code> database for a logical switch datapath, a
       priority-100 flow is added with the match <code>ip</code> to match on IP
       packets and sets the action <code>reg0[2] = 1; next;</code> to act as a
@@ -790,8 +794,9 @@
         policy, <code>ct_mark.blocked</code> will get set and packets in the
         reply direction will no longer be allowed, either. This flow also
         clears the register bits <code>reg0[9]</code> and
-        <code>reg0[10]</code>.  If ACL logging and logging of related packets
-        is enabled, then a companion priority-65533 flow will be installed that
+        <code>reg0[10]</code> and sets register bit <code>reg0[17]</code>.
+        If ACL logging and logging of related packets is enabled, then a
+        companion priority-65533 flow will be installed that
         accomplishes the same thing but also logs the traffic.
       </li>
 
@@ -1028,7 +1033,94 @@
       </li>
     </ul>
 
-    <h3>Ingress table 14: <code>from-lport</code> ACLs after LB</h3>
+    <h3>Ingress Table 14: Pre-Hairpin</h3>
+    <ul>
+      <li>
+        If the logical switch has load balancer(s) configured, then a
+        priority-100 flow is added with the match
+        <code>ip &amp;&amp; ct.trk</code> to check if the
+        packet needs to be hairpinned (if after load balancing the destination
+        IP matches the source IP) or not by executing the actions
+        <code>reg0[6] = chk_lb_hairpin();</code> and
+        <code>reg0[12] = chk_lb_hairpin_reply();</code> and advances the packet
+        to the next table.
+      </li>
+
+      <li>
+        A priority-0 flow that simply moves traffic to the next table.
+      </li>
+    </ul>
+
+    <h3>Ingress Table 15: Nat-Hairpin</h3>
+    <ul>
+      <li>
+         If the logical switch has load balancer(s) configured, then a
+         priority-100 flow is added with the match
+         <code>ip &amp;&amp; ct.new &amp;&amp; ct.trk &amp;&amp;
+         reg0[6] == 1</code> which hairpins the traffic by
+         NATting source IP to the load balancer VIP by executing the action
+         <code>ct_snat_to_vip</code> and advances the packet to the next table.
+      </li>
+
+      <li>
+         If the logical switch has load balancer(s) configured, then a
+         priority-100 flow is added with the match
+         <code>ip &amp;&amp; ct.est &amp;&amp; ct.trk &amp;&amp;
+         reg0[6] == 1</code> which hairpins the traffic by
+         NATting source IP to the load balancer VIP by executing the action
+         <code>ct_snat</code> and advances the packet to the next table.
+      </li>
+
+      <li>
+         If the logical switch has load balancer(s) configured, then a
+         priority-90 flow is added with the match
+         <code>ip &amp;&amp; reg0[12] == 1</code> which matches on the replies
+         of hairpinned traffic (i.e., destination IP is VIP,
+         source IP is the backend IP and source L4 port is backend port for L4
+         load balancers) and executes <code>ct_snat</code> and advances the
+         packet to the next table.
+      </li>
+
+      <li>
+        A priority-0 flow that simply moves traffic to the next table.
+      </li>
+    </ul>
+
+    <h3>Ingress Table 16: Hairpin</h3>
+    <ul>
+      <li>
+        <p>
+          For each distributed gateway router port <var>RP</var> attached to
+          the logical switch, a priority-2000 flow is added with the match
+          <code>reg0[14] == 1 &amp;&amp; is_chassis_resident(<var>RP</var>)
+          </code> and action <code>next;</code> to pass the traffic to the
+          next table to respond to the ARP requests for the router port IPs.
+        </p>
+
+        <p>
+          <code>reg0[14]</code> register bit is set in the ingress L2 port
+           security check table for traffic received from HW VTEP (ramp)
+           ports.
+        </p>
+      </li>
+
+      <li>
+        A priority-1000 flow that matches on <code>reg0[14]</code> register
+        bit for the traffic received from HW VTEP (ramp) ports.  This traffic
+        is passed to ingress table ls_in_l2_lkup.
+      </li>
+      <li>
+        A priority-1 flow that hairpins traffic matched by non-default
+        flows in the Pre-Hairpin table. Hairpinning is done at L2, Ethernet
+        addresses are swapped and the packets are looped back on the input
+        port.
+      </li>
+      <li>
+        A priority-0 flow that simply moves traffic to the next table.
+      </li>
+    </ul>
+
+    <h3>Ingress table 17: <code>from-lport</code> ACLs after LB</h3>
 
     <p>
       Logical flows in this table closely reproduce those in the
@@ -1085,12 +1177,21 @@
 
     <ul>
       <li>
+        One priority-65532 flow matching packets with <code>reg0[17]</code>
+        set (either replies to existing sessions or traffic related to
+        existing sessions) and allows these by advancing to the next
+        table.
+      </li>
+    </ul>
+
+    <ul>
+      <li>
         One priority-0 fallback flow that matches all packets and advances to
         the next table.
       </li>
     </ul>
 
-    <h3>Ingress Table 15: Stateful</h3>
+    <h3>Ingress Table 18: Stateful</h3>
 
     <ul>
       <li>
@@ -1107,93 +1208,6 @@
         packets to connection tracker using <code>ct_commit; next;</code>
         action based on a hint provided by the previous tables (with a match
         for <code>reg0[1] == 1 &amp;&amp; reg0[13] == 0</code>).
-      </li>
-      <li>
-        A priority-0 flow that simply moves traffic to the next table.
-      </li>
-    </ul>
-
-    <h3>Ingress Table 16: Pre-Hairpin</h3>
-    <ul>
-      <li>
-        If the logical switch has load balancer(s) configured, then a
-        priority-100 flow is added with the match
-        <code>ip &amp;&amp; ct.trk</code> to check if the
-        packet needs to be hairpinned (if after load balancing the destination
-        IP matches the source IP) or not by executing the actions
-        <code>reg0[6] = chk_lb_hairpin();</code> and
-        <code>reg0[12] = chk_lb_hairpin_reply();</code> and advances the packet
-        to the next table.
-      </li>
-
-      <li>
-        A priority-0 flow that simply moves traffic to the next table.
-      </li>
-    </ul>
-
-    <h3>Ingress Table 17: Nat-Hairpin</h3>
-    <ul>
-      <li>
-         If the logical switch has load balancer(s) configured, then a
-         priority-100 flow is added with the match
-         <code>ip &amp;&amp; ct.new &amp;&amp; ct.trk &amp;&amp;
-         reg0[6] == 1</code> which hairpins the traffic by
-         NATting source IP to the load balancer VIP by executing the action
-         <code>ct_snat_to_vip</code> and advances the packet to the next table.
-      </li>
-
-      <li>
-         If the logical switch has load balancer(s) configured, then a
-         priority-100 flow is added with the match
-         <code>ip &amp;&amp; ct.est &amp;&amp; ct.trk &amp;&amp;
-         reg0[6] == 1</code> which hairpins the traffic by
-         NATting source IP to the load balancer VIP by executing the action
-         <code>ct_snat</code> and advances the packet to the next table.
-      </li>
-
-      <li>
-         If the logical switch has load balancer(s) configured, then a
-         priority-90 flow is added with the match
-         <code>ip &amp;&amp; reg0[12] == 1</code> which matches on the replies
-         of hairpinned traffic (i.e., destination IP is VIP,
-         source IP is the backend IP and source L4 port is backend port for L4
-         load balancers) and executes <code>ct_snat</code> and advances the
-         packet to the next table.
-      </li>
-
-      <li>
-        A priority-0 flow that simply moves traffic to the next table.
-      </li>
-    </ul>
-
-    <h3>Ingress Table 18: Hairpin</h3>
-    <ul>
-      <li>
-        <p>
-          For each distributed gateway router port <var>RP</var> attached to
-          the logical switch, a priority-2000 flow is added with the match
-          <code>reg0[14] == 1 &amp;&amp; is_chassis_resident(<var>RP</var>)
-          </code> and action <code>next;</code> to pass the traffic to the
-          next table to respond to the ARP requests for the router port IPs.
-        </p>
-
-        <p>
-          <code>reg0[14]</code> register bit is set in the ingress L2 port
-           security check table for traffic received from HW VTEP (ramp)
-           ports.
-        </p>
-      </li>
-
-      <li>
-        A priority-1000 flow that matches on <code>reg0[14]</code> register
-        bit for the traffic received from HW VTEP (ramp) ports.  This traffic
-        is passed to ingress table ls_in_l2_lkup.
-      </li>
-      <li>
-        A priority-1 flow that hairpins traffic matched by non-default
-        flows in the Pre-Hairpin table. Hairpinning is done at L2, Ethernet
-        addresses are swapped and the packets are looped back on the input
-        port.
       </li>
       <li>
         A priority-0 flow that simply moves traffic to the next table.
@@ -1387,6 +1401,13 @@ nd_na_router {
           database), for logical ports of type <code>virtual</code> and for
           logical ports with 'unknown' address set.
         </p>
+
+        <p>
+          The above NDP responder flows are added for the list of
+          IPv6 addresses if defined in <code>options:arp_proxy</code> column of
+          <code>Logical_Switch_Port</code> table for logical switch ports of
+          type <code>router</code>.
+        </p>
       </li>
 
       <li>
@@ -1455,6 +1476,23 @@ output;
           These flows are required if an ARP request is sent for the IP
           <var>SVC_MON_SRC_IP</var>.
         </p>
+
+        <p>
+          For IPv6 the similar flow is added with the following action
+        </p>
+
+        <pre>
+nd_na {
+    eth.dst = eth.src;
+    eth.src = <var>E</var>;
+    ip6.src = <var>A</var>;
+    nd.target = <var>A</var>;
+    nd.tll = <var>E</var>;
+    outport = inport;
+    flags.loopback = 1;
+    output;
+};
+        </pre>
       </li>
 
       <li>
@@ -1973,7 +2011,34 @@ output;
       </li>
     </ul>
 
-    <h3>Egress Table 0: Pre-LB</h3>
+    <h3>Egress Table 0: <code>to-lport</code> Pre-ACLs</h3>
+
+    <p>
+      This is similar to ingress table <code>Pre-ACLs</code> except for
+     <code>to-lport</code> traffic.
+    </p>
+
+    <p>
+      This table also has a priority-110 flow with the match
+      <code>eth.src == <var>E</var></code> for all logical switch
+      datapaths to move traffic to the next table. Where <var>E</var>
+      is the service monitor mac defined in the
+      <ref column="options:svc_monitor_mac" table="NB_Global"
+      db="OVN_Northbound"/> column of <ref table="NB_Global"
+      db="OVN_Northbound"/> table.
+    </p>
+
+    <p>
+      This table also has a priority-110 flow with the match
+      <code>outport == <var>I</var></code> for all logical switch
+      datapaths to move traffic to the next table. Where <var>I</var>
+      is the peer of a logical router port. This flow is added to
+      skip the connection tracking of packets which will be entering
+      logical router datapath from logical switch datapath for routing.
+    </p>
+
+
+    <h3>Egress Table 1: Pre-LB</h3>
 
     <p>
       This table is similar to ingress table <code>Pre-LB</code>.  It
@@ -1998,27 +2063,11 @@ output;
       db="OVN_Northbound"/> table.
     </p>
 
-    <h3>Egress Table 1: <code>to-lport</code> Pre-ACLs</h3>
-
-    <p>
-      This is similar to ingress table <code>Pre-ACLs</code> except for
-     <code>to-lport</code> traffic.
-    </p>
-
-    <p>
-      This table also has a priority-110 flow with the match
-      <code>eth.src == <var>E</var></code> for all logical switch
-      datapaths to move traffic to the next table. Where <var>E</var>
-      is the service monitor mac defined in the
-      <ref column="options:svc_monitor_mac" table="NB_Global"
-      db="OVN_Northbound"/> column of <ref table="NB_Global"
-      db="OVN_Northbound"/> table.
-    </p>
-
     <p>
       This table also has a priority-110 flow with the match
       <code>outport == <var>I</var></code> for all logical switch
-      datapaths to move traffic to the next table. Where <var>I</var>
+      datapaths to move traffic to the next table, and, if there are no
+      stateful_acl, clear the ct_state. Where <var>I</var>
       is the peer of a logical router port. This flow is added to
       skip the connection tracking of packets which will be entering
       logical router datapath from logical switch datapath for routing.
@@ -3296,6 +3345,13 @@ icmp6 {
       packet de-fragmentation and tracking before sending it to the next table.
     </p>
 
+    <p>
+      If load balancing rules are configured in <code>OVN_Northbound</code>
+      database for a Gateway router, a priority 50 flow that matches
+      <code>icmp || icmp6</code> with an action of <code>ct_dnat;</code>,
+      this allows potentially related ICMP traffic to pass through CT.
+    </p>
+
     <h3>Ingress Table 6: Load balancing affinity check</h3>
 
     <p>
@@ -3488,7 +3544,9 @@ icmp6 {
             For the related traffic, a priority 50 flow that matches
             <code>ct.rel &amp;&amp; !ct.est &amp;&amp; !ct.new </code>
             with an action of <code>ct_commit_nat;</code>, if the router
-            has load balancer assigned to it.
+            has load balancer assigned to it. Along with two priority 70 flows
+            that match <code>skip_snat</code> and <code>force_snat</code>
+            flags.
         </p>
       </li>
     </ul>
@@ -4165,9 +4223,13 @@ outport = <var>P</var>
           data in the <code>OVN_Northbound</code> database.  For router ports
           connected to logical switches, MAC bindings can be known statically
           from the <code>addresses</code> column in the
-          <code>Logical_Switch_Port</code> table.  For router ports
-          connected to other logical routers, MAC bindings can be known
-          statically from the <code>mac</code> and <code>networks</code>
+          <code>Logical_Switch_Port</code> table. (Note: the flow is not
+          installed for IPs of logical switch ports of type
+          <code>virtual</code>, and dynamic MAC binding is used for those IPs
+          instead, so that virtual parent failover does not depend on <code>
+          ovn-northd</code>, to achieve better failover performance.) For
+          router ports connected to other logical routers, MAC bindings can be
+          known statically from the <code>mac</code> and <code>networks</code>
           column in the <code>Logical_Router_Port</code> table.  (Note: the
           flow is NOT installed for the IP addresses that belong to a neighbor
           logical router port if the current router has the
@@ -4180,33 +4242,6 @@ outport = <var>P</var>
           priority-100 flow with match <code>outport === <var>P</var>
           &amp;&amp; reg0 == <var>A</var></code> has actions
           <code>eth.dst = <var>E</var>; next;</code>.
-        </p>
-
-        <p>
-          For each virtual ip <var>A</var> configured on a logical port
-          of type <code>virtual</code> and its virtual parent set in
-          its corresponding <ref db="OVN_Southbound" table="Port_Binding"/>
-          record and the virtual parent with the Ethernet address <var>E</var>
-          and the virtual ip is reachable via the router port <var>P</var>, a
-          priority-100 flow with match <code>outport === <var>P</var>
-          &amp;&amp; xxreg0/reg0 == <var>A</var></code> has actions
-          <code>eth.dst = <var>E</var>; next;</code>.
-        </p>
-
-        <p>
-          For each virtual ip <var>A</var> configured on a logical port
-          of type <code>virtual</code> and its virtual parent <code>not</code>
-          set in its corresponding
-          <ref db="OVN_Southbound" table="Port_Binding"/>
-          record and the virtual ip <var>A</var> is reachable via the
-          router port <var>P</var>, a
-          priority-100 flow with match <code>outport === <var>P</var>
-          &amp;&amp; xxreg0/reg0 == <var>A</var></code> has actions
-          <code>eth.dst = <var>00:00:00:00:00:00</var>; next;</code>.
-          This flow is added so that the ARP is always resolved for the
-          virtual ip <var>A</var> by generating ARP request and
-          <code>not</code> consulting the MAC_Binding table as it can have
-          incorrect value for the virtual ip <var>A</var>.
         </p>
 
         <p>
@@ -4248,13 +4283,17 @@ outport = <var>P</var>
           For each row in the <code>NAT</code> table with IPv4 address
           <var>A</var> in the <ref column="external_ip"
           table="NAT" db="OVN_Northbound"/> column of
-          <ref table="NAT" db="OVN_Northbound"/> table, a priority-100
-          flow with the match <code>outport === <var>P</var> &amp;&amp;
-          reg0 == <var>A</var></code> has actions <code>eth.dst = <var>E</var>;
-          next;</code>, where <code>P</code> is the distributed logical router
-          port, <var>E</var> is the Ethernet address if set in the
-          <ref column="external_mac" table="NAT" db="OVN_Northbound"/> column
-          of <ref table="NAT" db="OVN_Northbound"/> table for of type
+          <ref table="NAT" db="OVN_Northbound"/> table, below two flows are
+          programmed:
+        </p>
+
+        <p>
+          A priority-100 flow with the match <code>outport == <var>P</var>
+          &amp;&amp; reg0 == <var>A</var></code> has actions <code>eth.dst =
+          <var>E</var>; next;</code>, where <code>P</code> is the distributed
+          logical router port, <var>E</var> is the Ethernet address if set in
+          the <ref column="external_mac" table="NAT" db="OVN_Northbound"/>
+          column of <ref table="NAT" db="OVN_Northbound"/> table for of type
           <code>dnat_and_snat</code>, otherwise the Ethernet address of the
           distributed logical router port. Note that if the
           <ref column="external_ip" table="NAT" db="OVN_Northbound"/> is not
@@ -4265,8 +4304,17 @@ outport = <var>P</var>
         </p>
 
         <p>
+          Corresponding to the above flow, a priority-150 flow with the match
+          <code>inport == <var>P</var> &amp;&amp; outport == <var>P</var>
+          &amp;&amp; ip4.dst == <var>A</var></code> has actions
+          <code>drop;</code> to exclude packets that have gone through
+          DNAT/unSNAT stage but failed to convert the destination, to avoid
+          loop.
+        </p>
+
+        <p>
           For IPv6 NAT entries, same flows are added, but using the register
-          <code>xxreg0</code> for the match.
+          <code>xxreg0</code> and field <code>ip6</code> for the match.
         </p>
       </li>
 

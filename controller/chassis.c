@@ -37,6 +37,9 @@ VLOG_DEFINE_THIS_MODULE(chassis);
 #define HOST_NAME_MAX 255
 #endif /* HOST_NAME_MAX */
 
+char *cli_system_id = NULL;
+char *file_system_id = NULL;
+
 /*
  * Structure for storing the chassis config parsed from the ovs table.
  */
@@ -93,11 +96,12 @@ chassis_register_ovs_idl(struct ovsdb_idl *ovs_idl)
 }
 
 static const char *
-get_hostname(const struct smap *ext_ids)
+get_hostname(const struct smap *ext_ids, const char *chassis_id)
 {
-    const char *hostname = smap_get_def(ext_ids, "hostname", "");
+    const char *hostname = get_chassis_external_id_value(ext_ids, chassis_id,
+                                                         "hostname", NULL);
 
-    if (strlen(hostname) == 0) {
+    if (!hostname) {
         static char hostname_[HOST_NAME_MAX + 1];
 
         if (gethostname(hostname_, sizeof(hostname_))) {
@@ -111,69 +115,81 @@ get_hostname(const struct smap *ext_ids)
 }
 
 static const char *
-get_bridge_mappings(const struct smap *ext_ids)
+get_bridge_mappings(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-bridge-mappings", "");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-bridge-mappings", "");
 }
 
 const char *
-get_chassis_mac_mappings(const struct smap *ext_ids)
+get_chassis_mac_mappings(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-chassis-mac-mappings", "");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-chassis-mac-mappings", "");
 }
 
 static const char *
-get_cms_options(const struct smap *ext_ids)
+get_cms_options(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-cms-options", "");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-cms-options", "");
 }
 
 static const char *
-get_monitor_all(const struct smap *ext_ids)
+get_monitor_all(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-monitor-all", "false");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-monitor-all", "false");
 }
 
 static const char *
-get_enable_lflow_cache(const struct smap *ext_ids)
+get_enable_lflow_cache(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-enable-lflow-cache", "true");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-enable-lflow-cache", "true");
 }
 
 static const char *
-get_limit_lflow_cache(const struct smap *ext_ids)
+get_limit_lflow_cache(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-limit-lflow-cache", "");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-limit-lflow-cache", "");
 }
 
 static const char *
-get_memlimit_lflow_cache(const struct smap *ext_ids)
+get_memlimit_lflow_cache(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-memlimit-lflow-cache-kb", "");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-memlimit-lflow-cache-kb", "");
 }
 
 static const char *
-get_trim_limit_lflow_cache(const struct smap *ext_ids)
+get_trim_limit_lflow_cache(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-trim-limit-lflow-cache", "");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-trim-limit-lflow-cache", "");
 }
 
 static const char *
-get_trim_wmark_perc_lflow_cache(const struct smap *ext_ids)
+get_trim_wmark_perc_lflow_cache(const struct smap *ext_ids,
+                                const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-trim-wmark-perc-lflow-cache", "");
+    return get_chassis_external_id_value(
+        ext_ids, chassis_id, "ovn-trim-wmark-perc-lflow-cache", "");
 }
 
 static const char *
-get_trim_timeout(const struct smap *ext_ids)
+get_trim_timeout(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-trim-timeout-ms", "");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-trim-timeout-ms", "");
 }
 
 static const char *
-get_encap_csum(const struct smap *ext_ids)
+get_encap_csum(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_def(ext_ids, "ovn-encap-csum", "true");
+    return get_chassis_external_id_value(ext_ids, chassis_id,
+                                         "ovn-encap-csum", "true");
 }
 
 static const char *
@@ -187,9 +203,10 @@ get_datapath_type(const struct ovsrec_bridge *br_int)
 }
 
 static bool
-get_is_interconn(const struct smap *ext_ids)
+get_is_interconn(const struct smap *ext_ids, const char *chassis_id)
 {
-    return smap_get_bool(ext_ids, "ovn-is-interconn", false);
+    return get_chassis_external_id_value_bool(ext_ids, chassis_id,
+                                              "ovn-is-interconn", false);
 }
 
 static void
@@ -216,7 +233,7 @@ update_chassis_transport_zones(const struct sset *transport_zones,
  * Parse an ovs 'encap_type' string and stores the resulting types in the
  * 'encap_type_set' string set.
  */
-static bool
+static void
 chassis_parse_ovs_encap_type(const char *encap_type,
                              struct sset *encap_type_set)
 {
@@ -230,26 +247,23 @@ chassis_parse_ovs_encap_type(const char *encap_type,
             VLOG_INFO_RL(&rl, "Unknown tunnel type: %s", type);
         }
     }
-
-    return true;
 }
 
 /*
  * Parse an ovs 'encap_ip' string and stores the resulting IP representations
  * in the 'encap_ip_set' string set.
  */
-static bool
+static void
 chassis_parse_ovs_encap_ip(const char *encap_ip, struct sset *encap_ip_set)
 {
     sset_from_delimited_string(encap_ip_set, encap_ip, ",");
-    return true;
 }
 
 /*
  * Parse the ovs 'iface_types' and store them in the format required by the
  * Chassis record.
  */
-static bool
+static void
 chassis_parse_ovs_iface_types(char **iface_types, size_t n_iface_types,
                               struct ds *iface_types_str)
 {
@@ -257,7 +271,6 @@ chassis_parse_ovs_iface_types(char **iface_types, size_t n_iface_types,
         ds_put_format(iface_types_str, "%s,", iface_types[i]);
     }
     ds_chomp(iface_types_str, ',');
-    return true;
 }
 
 /*
@@ -276,53 +289,55 @@ chassis_parse_ovs_config(const struct ovsrec_open_vswitch_table *ovs_table,
         return false;
     }
 
-    const char *encap_type = smap_get(&cfg->external_ids, "ovn-encap-type");
-    const char *encap_ips = smap_get(&cfg->external_ids, "ovn-encap-ip");
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    const char *encap_type =
+        get_chassis_external_id_value(&cfg->external_ids, chassis_id,
+                                      "ovn-encap-type", NULL);
+
+    const char *encap_ips =
+        get_chassis_external_id_value(&cfg->external_ids, chassis_id,
+                                      "ovn-encap-ip", NULL);
     if (!encap_type || !encap_ips) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
         VLOG_INFO_RL(&rl, "Need to specify an encap type and ip");
         return false;
     }
 
-    ovs_cfg->hostname = get_hostname(&cfg->external_ids);
-    ovs_cfg->bridge_mappings = get_bridge_mappings(&cfg->external_ids);
+    ovs_cfg->hostname = get_hostname(&cfg->external_ids, chassis_id);
+    ovs_cfg->bridge_mappings =
+        get_bridge_mappings(&cfg->external_ids, chassis_id);
     ovs_cfg->datapath_type = get_datapath_type(br_int);
-    ovs_cfg->encap_csum = get_encap_csum(&cfg->external_ids);
-    ovs_cfg->cms_options = get_cms_options(&cfg->external_ids);
-    ovs_cfg->monitor_all = get_monitor_all(&cfg->external_ids);
-    ovs_cfg->chassis_macs = get_chassis_mac_mappings(&cfg->external_ids);
-    ovs_cfg->enable_lflow_cache = get_enable_lflow_cache(&cfg->external_ids);
-    ovs_cfg->limit_lflow_cache = get_limit_lflow_cache(&cfg->external_ids);
+    ovs_cfg->encap_csum = get_encap_csum(&cfg->external_ids, chassis_id);
+    ovs_cfg->cms_options = get_cms_options(&cfg->external_ids, chassis_id);
+    ovs_cfg->monitor_all = get_monitor_all(&cfg->external_ids, chassis_id);
+    ovs_cfg->chassis_macs =
+        get_chassis_mac_mappings(&cfg->external_ids, chassis_id);
+    ovs_cfg->enable_lflow_cache =
+        get_enable_lflow_cache(&cfg->external_ids, chassis_id);
+    ovs_cfg->limit_lflow_cache =
+        get_limit_lflow_cache(&cfg->external_ids, chassis_id);
     ovs_cfg->memlimit_lflow_cache =
-        get_memlimit_lflow_cache(&cfg->external_ids);
+        get_memlimit_lflow_cache(&cfg->external_ids, chassis_id);
     ovs_cfg->trim_limit_lflow_cache =
-        get_trim_limit_lflow_cache(&cfg->external_ids);
+        get_trim_limit_lflow_cache(&cfg->external_ids, chassis_id);
     ovs_cfg->trim_wmark_perc_lflow_cache =
-        get_trim_wmark_perc_lflow_cache(&cfg->external_ids);
-    ovs_cfg->trim_timeout_ms = get_trim_timeout(&cfg->external_ids);
+        get_trim_wmark_perc_lflow_cache(&cfg->external_ids, chassis_id);
+    ovs_cfg->trim_timeout_ms =
+        get_trim_timeout(&cfg->external_ids, chassis_id);
 
-    if (!chassis_parse_ovs_encap_type(encap_type, &ovs_cfg->encap_type_set)) {
-        return false;
-    }
+    chassis_parse_ovs_encap_type(encap_type, &ovs_cfg->encap_type_set);
 
     /* 'ovn-encap-ip' can accept a comma-delimited list of IP addresses instead
      * of a single IP address. Although this is undocumented, it can be used
      * to enable certain hardware-offloaded use cases in which a host has
      * multiple NICs and is assigning SR-IOV VFs to a guest (as logical ports).
      */
-    if (!chassis_parse_ovs_encap_ip(encap_ips, &ovs_cfg->encap_ip_set)) {
-        sset_destroy(&ovs_cfg->encap_type_set);
-        return false;
-    }
+    chassis_parse_ovs_encap_ip(encap_ips, &ovs_cfg->encap_ip_set);
 
-    if (!chassis_parse_ovs_iface_types(cfg->iface_types,
-                                       cfg->n_iface_types,
-                                       &ovs_cfg->iface_types)) {
-        sset_destroy(&ovs_cfg->encap_type_set);
-        sset_destroy(&ovs_cfg->encap_ip_set);
-    }
+    chassis_parse_ovs_iface_types(cfg->iface_types, cfg->n_iface_types,
+                                  &ovs_cfg->iface_types);
 
-    ovs_cfg->is_interconn = get_is_interconn(&cfg->external_ids);
+    ovs_cfg->is_interconn = get_is_interconn(&cfg->external_ids, chassis_id);
 
     return true;
 }
@@ -352,6 +367,7 @@ chassis_build_other_config(const struct ovs_chassis_cfg *ovs_cfg,
     smap_replace(config, OVN_FEATURE_PORT_UP_NOTIF, "true");
     smap_replace(config, OVN_FEATURE_CT_NO_MASKED_LABEL, "true");
     smap_replace(config, OVN_FEATURE_MAC_BINDING_TIMESTAMP, "true");
+    smap_replace(config, OVN_FEATURE_CT_LB_RELATED, "true");
 }
 
 /*
@@ -362,7 +378,7 @@ chassis_other_config_changed(const struct ovs_chassis_cfg *ovs_cfg,
                              const struct sbrec_chassis *chassis_rec)
 {
     const char *chassis_bridge_mappings =
-        get_bridge_mappings(&chassis_rec->other_config);
+        get_bridge_mappings(&chassis_rec->other_config, chassis_rec->name);
 
     if (strcmp(ovs_cfg->bridge_mappings, chassis_bridge_mappings)) {
         return true;
@@ -376,42 +392,44 @@ chassis_other_config_changed(const struct ovs_chassis_cfg *ovs_cfg,
     }
 
     const char *chassis_cms_options =
-        get_cms_options(&chassis_rec->other_config);
+        get_cms_options(&chassis_rec->other_config, chassis_rec->name);
 
     if (strcmp(ovs_cfg->cms_options, chassis_cms_options)) {
         return true;
     }
 
     const char *chassis_monitor_all =
-        get_monitor_all(&chassis_rec->other_config);
+        get_monitor_all(&chassis_rec->other_config, chassis_rec->name);
 
     if (strcmp(ovs_cfg->monitor_all, chassis_monitor_all)) {
         return true;
     }
 
     const char *chassis_enable_lflow_cache =
-        get_enable_lflow_cache(&chassis_rec->other_config);
+        get_enable_lflow_cache(&chassis_rec->other_config, chassis_rec->name);
 
     if (strcmp(ovs_cfg->enable_lflow_cache, chassis_enable_lflow_cache)) {
         return true;
     }
 
     const char *chassis_limit_lflow_cache =
-        get_limit_lflow_cache(&chassis_rec->other_config);
+        get_limit_lflow_cache(&chassis_rec->other_config, chassis_rec->name);
 
     if (strcmp(ovs_cfg->limit_lflow_cache, chassis_limit_lflow_cache)) {
         return true;
     }
 
     const char *chassis_memlimit_lflow_cache =
-        get_memlimit_lflow_cache(&chassis_rec->other_config);
+        get_memlimit_lflow_cache(&chassis_rec->other_config,
+                                 chassis_rec->name);
 
     if (strcmp(ovs_cfg->memlimit_lflow_cache, chassis_memlimit_lflow_cache)) {
         return true;
     }
 
     const char *chassis_trim_limit_lflow_cache =
-        get_trim_limit_lflow_cache(&chassis_rec->other_config);
+        get_trim_limit_lflow_cache(&chassis_rec->other_config,
+                                   chassis_rec->name);
 
     if (strcmp(ovs_cfg->trim_limit_lflow_cache,
                chassis_trim_limit_lflow_cache)) {
@@ -419,7 +437,8 @@ chassis_other_config_changed(const struct ovs_chassis_cfg *ovs_cfg,
     }
 
     const char *chassis_trim_wmark_perc_lflow_cache =
-        get_trim_wmark_perc_lflow_cache(&chassis_rec->other_config);
+        get_trim_wmark_perc_lflow_cache(
+            &chassis_rec->other_config, chassis_rec->name);
 
     if (strcmp(ovs_cfg->trim_wmark_perc_lflow_cache,
                chassis_trim_wmark_perc_lflow_cache)) {
@@ -427,14 +446,15 @@ chassis_other_config_changed(const struct ovs_chassis_cfg *ovs_cfg,
     }
 
     const char *chassis_trim_timeout_ms =
-        get_trim_timeout(&chassis_rec->other_config);
+        get_trim_timeout(&chassis_rec->other_config, chassis_rec->name);
 
     if (strcmp(ovs_cfg->trim_timeout_ms, chassis_trim_timeout_ms)) {
         return true;
     }
 
     const char *chassis_mac_mappings =
-        get_chassis_mac_mappings(&chassis_rec->other_config);
+        get_chassis_mac_mappings(&chassis_rec->other_config,
+                                 chassis_rec->name);
     if (strcmp(ovs_cfg->chassis_macs, chassis_mac_mappings)) {
         return true;
     }
@@ -465,6 +485,12 @@ chassis_other_config_changed(const struct ovs_chassis_cfg *ovs_cfg,
 
     if (!smap_get_bool(&chassis_rec->other_config,
                        OVN_FEATURE_MAC_BINDING_TIMESTAMP,
+                       false)) {
+        return true;
+    }
+
+    if (!smap_get_bool(&chassis_rec->other_config,
+                       OVN_FEATURE_CT_LB_RELATED,
                        false)) {
         return true;
     }
@@ -571,6 +597,55 @@ chassis_build_encaps(struct ovsdb_idl_txn *ovnsb_idl_txn,
     return encaps;
 }
 
+/* 'struct sset' of all supported options in other_confing. Anything missing
+ * in this set will be removed from the chassis configuration. */
+static void
+update_supported_sset(struct sset *supported)
+{
+    /* OvS external_ids. */
+    sset_add(supported, "ovn-bridge-mappings");
+    sset_add(supported, "datapath-type");
+    sset_add(supported, "ovn-cms-options");
+    sset_add(supported, "ovn-monitor-all");
+    sset_add(supported, "ovn-enable-lflow-cache");
+    sset_add(supported, "ovn-limit-lflow-cache");
+    sset_add(supported, "ovn-memlimit-lflow-cache-kb");
+    sset_add(supported, "ovn-trim-limit-lflow-cache");
+    sset_add(supported, "ovn-trim-wmark-perc-lflow-cache");
+    sset_add(supported, "ovn-trim-timeout-ms");
+    sset_add(supported, "iface-types");
+    sset_add(supported, "ovn-chassis-mac-mappings");
+    sset_add(supported, "is-interconn");
+
+    /* Internal options. */
+    sset_add(supported, "is-vtep");
+    sset_add(supported, "is-remote");
+    sset_add(supported, OVN_FEATURE_PORT_UP_NOTIF);
+    sset_add(supported, OVN_FEATURE_CT_NO_MASKED_LABEL);
+    sset_add(supported, OVN_FEATURE_MAC_BINDING_TIMESTAMP);
+    sset_add(supported, OVN_FEATURE_CT_LB_RELATED);
+}
+
+static void
+remove_unsupported_options(const struct sbrec_chassis *chassis_rec,
+                           bool *updated)
+{
+    struct sset supported_options = SSET_INITIALIZER(&supported_options);
+    update_supported_sset(&supported_options);
+
+    const struct smap_node *node;
+    SMAP_FOR_EACH (node, &chassis_rec->other_config) {
+        if (!sset_contains(&supported_options, node->key)) {
+            VLOG_WARN("Removing unsupported key \"%s\" from chassis record.",
+                      node->key);
+            sbrec_chassis_update_other_config_delkey(chassis_rec, node->key);
+            *updated = true;
+        }
+    }
+
+    sset_destroy(&supported_options);
+}
+
 /* If this is a chassis config update after we initialized the record once
  * then we should always be able to find it with the ID we saved in
  * chassis_state.
@@ -636,6 +711,8 @@ chassis_update(const struct sbrec_chassis *chassis_rec,
 
     update_chassis_transport_zones(transport_zones, chassis_rec);
 
+    remove_unsupported_options(chassis_rec, &updated);
+
     /* If any of the encaps should change, update them. */
     bool tunnels_changed =
         chassis_tunnels_changed(&ovs_cfg->encap_type_set,
@@ -675,7 +752,7 @@ chassis_private_get_record(
             chassis_private_lookup_by_name(sbrec_chassis_pvt_by_name,
                                            chassis_id);
 
-    if (!chassis_p && ovnsb_idl_txn) {
+    if (!chassis_p) {
         return sbrec_chassis_private_insert(ovnsb_idl_txn);
     }
 
@@ -754,8 +831,9 @@ chassis_get_mac(const struct sbrec_chassis *chassis_rec,
                 const char *bridge_mapping,
                 struct eth_addr *chassis_mac)
 {
-    const char *tokens
-        = get_chassis_mac_mappings(&chassis_rec->other_config);
+    const char *tokens =
+        get_chassis_mac_mappings(&chassis_rec->other_config,
+                                 chassis_rec->name);
     if (!tokens[0]) {
        return false;
     }
@@ -794,21 +872,154 @@ chassis_get_mac(const struct sbrec_chassis *chassis_rec,
     return ret;
 }
 
+const char *
+get_ovs_chassis_id(const struct ovsrec_open_vswitch_table *ovs_table)
+{
+    if (cli_system_id) {
+        return cli_system_id;
+    }
+
+    if (file_system_id) {
+        return file_system_id;
+    }
+
+    const struct ovsrec_open_vswitch *cfg
+        = ovsrec_open_vswitch_table_first(ovs_table);
+    const char *chassis_id = cfg ? smap_get(&cfg->external_ids, "system-id")
+                                 : NULL;
+
+    if (!chassis_id) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_WARN_RL(&rl, "'system-id' in Open_vSwitch database is missing.");
+    }
+
+    return chassis_id;
+}
+
+static bool
+is_chassis_idx_stored(const struct ovsrec_open_vswitch_table *ovs_table)
+{
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_table_first(ovs_table);
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    if (!chassis_id) {
+        return false;
+    }
+    char *idx_key = xasprintf(CHASSIS_IDX_PREFIX "%s", chassis_id);
+    const char *idx = smap_get(&cfg->other_config, idx_key);
+    free(idx_key);
+    return !!idx;
+}
+
+const char *get_chassis_idx(const struct ovsrec_open_vswitch_table *ovs_table)
+{
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_table_first(ovs_table);
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    if (!chassis_id) {
+        return "";
+    }
+    char *idx_key = xasprintf(CHASSIS_IDX_PREFIX "%s", chassis_id);
+    const char *idx = smap_get_def(&cfg->other_config, idx_key, "");
+    free(idx_key);
+    return idx;
+}
+
+void
+store_chassis_index_if_needed(
+        const struct ovsrec_open_vswitch_table *ovs_table)
+{
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_table_first(ovs_table);
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+
+    char *idx_key = xasprintf(CHASSIS_IDX_PREFIX "%s", chassis_id);
+    const char *chassis_idx = smap_get(&cfg->other_config, idx_key);
+    if (!chassis_idx) {
+        /* Collect all indices so far consumed by other chassis. */
+        struct sset used_indices = SSET_INITIALIZER(&used_indices);
+        struct smap_node *node;
+        SMAP_FOR_EACH (node, &cfg->other_config) {
+            if (!strncmp(node->key, CHASSIS_IDX_PREFIX,
+                    sizeof(CHASSIS_IDX_PREFIX) - 1)) {
+                sset_add(&used_indices, node->value);
+            }
+        }
+        /* First chassis on the host: use an empty string to avoid adding an
+         * unnecessary index character to tunnel port names when a single
+         * controller is running on the host (the most common case). */
+        if (!sset_contains(&used_indices, "")) {
+            ovsrec_open_vswitch_update_other_config_setkey(
+                cfg, idx_key, "");
+            goto out;
+        }
+        /* Next chassis gets an alphanum index allocated. */
+        char idx[] = "0";
+        for (char i = '0'; i <= '9'; i++) {
+            idx[0] = i;
+            if (!sset_contains(&used_indices, idx)) {
+                ovsrec_open_vswitch_update_other_config_setkey(
+                    cfg, idx_key, idx);
+                goto out;
+            }
+        }
+        for (char i = 'a'; i <= 'z'; i++) {
+            idx[0] = i;
+            if (!sset_contains(&used_indices, idx)) {
+                ovsrec_open_vswitch_update_other_config_setkey(
+                    cfg, idx_key, idx);
+                goto out;
+            }
+        }
+        /* All indices consumed: it's safer to just abort. */
+        VLOG_ERR("All unique controller indices consumed. Exiting.");
+        exit(EXIT_FAILURE);
+    }
+out:
+    free(idx_key);
+}
+
+static void
+clear_chassis_index_if_needed(
+        const struct ovsrec_open_vswitch_table *ovs_table)
+{
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_table_first(ovs_table);
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    char *idx_key = xasprintf(CHASSIS_IDX_PREFIX "%s", chassis_id);
+    if (smap_get(&cfg->other_config, idx_key)) {
+        ovsrec_open_vswitch_update_other_config_delkey(cfg, idx_key);
+    }
+    free(idx_key);
+}
+
 /* Returns true if the database is all cleaned up, false if more work is
  * required. */
 bool
-chassis_cleanup(struct ovsdb_idl_txn *ovnsb_idl_txn,
+chassis_cleanup(struct ovsdb_idl_txn *ovs_idl_txn,
+                struct ovsdb_idl_txn *ovnsb_idl_txn,
+                const struct ovsrec_open_vswitch_table *ovs_table,
                 const struct sbrec_chassis *chassis_rec,
                 const struct sbrec_chassis_private *chassis_private_rec)
 {
-    if (!chassis_rec && !chassis_private_rec) {
+    if (!chassis_rec && !chassis_private_rec &&
+            !is_chassis_idx_stored(ovs_table)) {
         return true;
     }
+
+    const char *chassis_name = get_ovs_chassis_id(ovs_table);
+    if (ovs_idl_txn) {
+        ovsdb_idl_txn_add_comment(
+            ovs_idl_txn,
+            "ovn-controller: unregistering chassis index for '%s'",
+            chassis_name);
+        clear_chassis_index_if_needed(ovs_table);
+    }
+
     if (ovnsb_idl_txn) {
         ovsdb_idl_txn_add_comment(ovnsb_idl_txn,
                                   "ovn-controller: unregistering chassis '%s'",
-                                  chassis_rec ? chassis_rec->name
-                                  : chassis_private_rec->name);
+                                  chassis_name);
         if (chassis_rec) {
             sbrec_chassis_delete(chassis_rec);
         }

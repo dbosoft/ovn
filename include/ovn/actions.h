@@ -33,6 +33,7 @@ struct ofpbuf;
 struct shash;
 struct simap;
 struct ovn_extend_table;
+struct collector_set_ids;
 
 /* List of OVN logical actions.
  *
@@ -264,6 +265,14 @@ struct ovnact_ct_commit_v1 {
     ovs_be128 ct_label, ct_label_mask;
 };
 
+/* Type of NAT used for the particular action.
+ * UNSPEC translates to applying NAT that works for both directions. */
+enum ovnact_ct_nat_type {
+    OVNACT_CT_NAT_SRC,
+    OVNACT_CT_NAT_DEST,
+    OVNACT_CT_NAT_UNSPEC,
+};
+
 /* OVNACT_CT_DNAT, OVNACT_CT_SNAT, OVNACT_CT_COMMIT_NAT. */
 struct ovnact_ct_nat {
     struct ovnact ovnact;
@@ -279,9 +288,17 @@ struct ovnact_ct_nat {
        uint16_t port_hi;
     } port_range;
 
+    enum ovnact_ct_nat_type type;
+
     bool commit;                /* Explicit commit action. */
 
     uint8_t ltable;             /* Logical table ID of next table. */
+};
+
+enum ovnact_ct_lb_flag {
+    OVNACT_CT_LB_FLAG_NONE,
+    OVNACT_CT_LB_FLAG_SKIP_SNAT,
+    OVNACT_CT_LB_FLAG_FORCE_SNAT,
 };
 
 struct ovnact_ct_lb_dst {
@@ -300,6 +317,7 @@ struct ovnact_ct_lb {
     size_t n_dsts;
     uint8_t ltable;             /* Logical table ID of next table. */
     char *hash_fields;
+    enum ovnact_ct_lb_flag ct_flag;
 };
 
 struct ovnact_select_dst {
@@ -813,6 +831,9 @@ struct ovnact_encode_params {
 
     /* A struct to figure out the meter_id for meter actions. */
     struct ovn_extend_table *meter_table;
+
+    /* A struct to lookup Flow_Sample_Collector_Set ids */
+    const struct flow_collector_ids *collector_ids;
 
     /* The logical flow uuid that drove this action. */
     struct uuid lflow_uuid;

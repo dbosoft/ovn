@@ -290,7 +290,7 @@ net_attach () {
 
 # ovn_az_attach AZ NETWORK BRIDGE IP [MASKLEN] [ENCAP]
 ovn_az_attach() {
-    local az=$1 net=$2 bridge=$3 ip=$4 masklen=${5-24} encap=${6-geneve,vxlan}
+    local az=$1 net=$2 bridge=$3 ip=$4 masklen=${5-24} encap=${6-geneve,vxlan} systemid=${7-$sandbox} cli_args=${@:8}
     net_attach $net $bridge || return 1
 
     mac=`ovs-vsctl get Interface $bridge mac_in_use | sed s/\"//g`
@@ -315,7 +315,7 @@ ovn_az_attach() {
     fi
     ovs-vsctl \
         -- set Open_vSwitch . external-ids:hostname=$sandbox \
-        -- set Open_vSwitch . external-ids:system-id=$sandbox \
+        -- set Open_vSwitch . external-ids:system-id=$systemid \
         -- set Open_vSwitch . external-ids:ovn-remote=$ovn_remote \
         -- set Open_vSwitch . external-ids:ovn-encap-type=$encap \
         -- set Open_vSwitch . external-ids:ovn-encap-ip=$ip \
@@ -331,7 +331,7 @@ ovn_az_attach() {
         ovs-vsctl set open . external_ids:ovn-monitor-all=true
     fi
 
-    start_daemon ovn-controller --enable-dummy-vif-plug || return 1
+    start_daemon ovn-controller --enable-dummy-vif-plug ${cli_args} || return 1
 }
 
 # ovn_attach NETWORK BRIDGE IP [MASKLEN] [ENCAP]
@@ -343,6 +343,36 @@ ovn_az_attach() {
 # and starts ovn-controller.
 ovn_attach() {
     ovn_az_attach NONE $@
+}
+
+# This function is similar to ovn_attach but makes sure it doesn't
+# mess with another controller settings
+start_virtual_controller() {
+    local net=$1 bridge=$2 int_bridge=$3 ip=$4 masklen=${5-24} encap=${6-geneve,vxlan} systemid=${7-$sandbox} cli_args=${@:8}
+    net_attach $net $bridge || return 1
+
+    mac=`ovs-vsctl get Interface $bridge mac_in_use | sed s/\"//g`
+    arp_table="$arp_table $sandbox,$bridge,$ip,$mac"
+    ovs-appctl netdev-dummy/ip4addr $bridge $ip/$masklen >/dev/null || return 1
+    ovs-appctl ovs/route/add $ip/$masklen $bridge >/dev/null || return 1
+
+    local ovn_remote
+    if test X$HAVE_OPENSSL = Xyes; then
+        ovn_remote=$SSL_OVN_SB_DB
+    else
+        ovn_remote=unix:$ovs_base/ovn-sb/ovn-sb.sock
+    fi
+    ovs-vsctl \
+        -- set Open_vSwitch . external-ids:ovn-remote-$systemid=$ovn_remote \
+        -- set Open_vSwitch . external-ids:ovn-encap-type-$systemid=$encap \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip-$systemid=$ip \
+        -- set Open_vSwitch . external-ids:ovn-bridge-$systemid=$int_bridge \
+        -- --may-exist add-br $int_bridge \
+        -- set bridge $int_bridge fail-mode=secure other-config:disable-in-band=true \
+        || return 1
+
+    echo IHAR ${cli_args}
+    ovn-controller --enable-dummy-vif-plug ${cli_args} -vconsole:off --detach --no-chdir
 }
 
 # ovn_setenv AZ
@@ -514,27 +544,6 @@ wait_for_ports_up() {
             wait_row_count nb:Logical_Switch_Port 1 up=true name=$port
         done
     fi
-}
-
-# reset_iface_pcap_file iface pcap_file
-# Resets the pcap file associates with OVS interface.  should be used
-# with dummy datapath.
-#
-# XXX: This should actually replace reset_pcap_file() as they do almost
-# exactly the same thing but the "wait while the pcap file has the size
-# of the PCAP header" check causes tests to fail.
-reset_iface_pcap_file() {
-    local iface=$1
-    local pcap_file=$2
-    check rm -f dummy-*.pcap
-    check ovs-vsctl -- set Interface $iface options:tx_pcap=dummy-tx.pcap \
-options:rxq_pcap=dummy-rx.pcap
-    OVS_WAIT_WHILE([test 24 = $(wc -c dummy-tx.pcap | cut -d " " -f1)])
-    check rm -f ${pcap_file}*.pcap
-    check ovs-vsctl -- set Interface $iface options:tx_pcap=${pcap_file}-tx.pcap \
-options:rxq_pcap=${pcap_file}-rx.pcap
-
-    OVS_WAIT_WHILE([test 24 = $(wc -c ${pcap_file}-tx.pcap | cut -d " " -f1)])
 }
 
 # reset_pcap_file iface pcap_file

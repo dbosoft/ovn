@@ -19,10 +19,12 @@
 #include "lib/ovn-nb-idl.h"
 #include "lib/ovn-sb-idl.h"
 #include "lib/ovn-util.h"
+#include "northd/northd.h"
 #include "ovn/lex.h"
 
 /* OpenvSwitch lib includes. */
 #include "openvswitch/vlog.h"
+#include "lib/bitmap.h"
 #include "lib/smap.h"
 
 VLOG_DEFINE_THIS_MODULE(lb);
@@ -314,11 +316,10 @@ ovn_lb_vip_destroy(struct ovn_lb_vip *vip)
     free(vip->backends);
 }
 
-void
-ovn_lb_vip_format(const struct ovn_lb_vip *vip, struct ds *s, bool template)
+static void
+ovn_lb_vip_format__(const struct ovn_lb_vip *vip, struct ds *s,
+                    bool needs_brackets)
 {
-    bool needs_brackets = vip->address_family == AF_INET6 && vip->port_str
-                          && !template;
     if (needs_brackets) {
         ds_put_char(s, '[');
     }
@@ -329,6 +330,30 @@ ovn_lb_vip_format(const struct ovn_lb_vip *vip, struct ds *s, bool template)
     if (vip->port_str) {
         ds_put_format(s, ":%s", vip->port_str);
     }
+}
+
+/* Formats the VIP in the way the ovn-controller expects it, that is,
+ * template IPv6 variables need to be between brackets too.
+ */
+static char *
+ovn_lb_vip6_template_format_internal(const struct ovn_lb_vip *vip)
+{
+    struct ds s = DS_EMPTY_INITIALIZER;
+
+    if (vip->vip_str && *vip->vip_str == LEX_TEMPLATE_PREFIX) {
+        ovn_lb_vip_format__(vip, &s, true);
+    } else {
+        ovn_lb_vip_format(vip, &s, !!vip->port_str);
+    }
+    return ds_steal_cstr(&s);
+}
+
+void
+ovn_lb_vip_format(const struct ovn_lb_vip *vip, struct ds *s, bool template)
+{
+    bool needs_brackets = vip->address_family == AF_INET6 && vip->port_str
+                          && !template;
+    ovn_lb_vip_format__(vip, s, needs_brackets);
 }
 
 void
@@ -495,7 +520,8 @@ ovn_lb_get_health_check(const struct nbrec_load_balancer *nbrec_lb,
 }
 
 struct ovn_northd_lb *
-ovn_northd_lb_create(const struct nbrec_load_balancer *nbrec_lb)
+ovn_northd_lb_create(const struct nbrec_load_balancer *nbrec_lb,
+                     size_t n_datapaths)
 {
     bool template = smap_get_bool(&nbrec_lb->options, "template", false);
     bool is_udp = nullable_string_is_equal(nbrec_lb->protocol, "udp");
@@ -512,6 +538,7 @@ ovn_northd_lb_create(const struct nbrec_load_balancer *nbrec_lb)
     lb->n_vips = smap_count(&nbrec_lb->vips);
     lb->vips = xcalloc(lb->n_vips, sizeof *lb->vips);
     lb->vips_nb = xcalloc(lb->n_vips, sizeof *lb->vips_nb);
+    smap_init(&lb->template_vips);
     lb->controller_event = smap_get_bool(&nbrec_lb->options, "event", false);
 
     bool routable = smap_get_bool(&nbrec_lb->options, "add_route", false);
@@ -532,6 +559,9 @@ ovn_northd_lb_create(const struct nbrec_load_balancer *nbrec_lb)
         affinity_timeout = UINT16_MAX;
     }
     lb->affinity_timeout = affinity_timeout;
+
+    lb->nb_ls_map = bitmap_allocate(n_datapaths);
+    lb->nb_lr_map = bitmap_allocate(n_datapaths);
 
     sset_init(&lb->ips_v4);
     sset_init(&lb->ips_v6);
@@ -559,6 +589,12 @@ ovn_northd_lb_create(const struct nbrec_load_balancer *nbrec_lb)
             sset_add(&lb->ips_v4, lb_vip->vip_str);
         } else {
             sset_add(&lb->ips_v6, lb_vip->vip_str);
+        }
+
+        if (lb->template && address_family == AF_INET6) {
+            smap_add_nocopy(&lb->template_vips,
+                            ovn_lb_vip6_template_format_internal(lb_vip),
+                            xstrdup(node->value));
         }
         n_vips++;
     }
@@ -604,28 +640,31 @@ ovn_northd_lb_find(const struct hmap *lbs, const struct uuid *uuid)
     return NULL;
 }
 
+const struct smap *
+ovn_northd_lb_get_vips(const struct ovn_northd_lb *lb)
+{
+    if (!smap_is_empty(&lb->template_vips)) {
+        return &lb->template_vips;
+    }
+    return &lb->nlb->vips;
+}
+
 void
 ovn_northd_lb_add_lr(struct ovn_northd_lb *lb, size_t n,
                      struct ovn_datapath **ods)
 {
-    while (lb->n_allocated_nb_lr <= lb->n_nb_lr + n) {
-        lb->nb_lr = x2nrealloc(lb->nb_lr, &lb->n_allocated_nb_lr,
-                               sizeof *lb->nb_lr);
+    for (size_t i = 0; i < n; i++) {
+        bitmap_set1(lb->nb_lr_map, ods[i]->index);
     }
-    memcpy(&lb->nb_lr[lb->n_nb_lr], ods, n * sizeof *ods);
-    lb->n_nb_lr += n;
 }
 
 void
 ovn_northd_lb_add_ls(struct ovn_northd_lb *lb, size_t n,
                      struct ovn_datapath **ods)
 {
-    while (lb->n_allocated_nb_ls <= lb->n_nb_ls + n) {
-        lb->nb_ls = x2nrealloc(lb->nb_ls, &lb->n_allocated_nb_ls,
-                               sizeof *lb->nb_ls);
+    for (size_t i = 0; i < n; i++) {
+        bitmap_set1(lb->nb_ls_map, ods[i]->index);
     }
-    memcpy(&lb->nb_ls[lb->n_nb_ls], ods, n * sizeof *ods);
-    lb->n_nb_ls += n;
 }
 
 void
@@ -637,11 +676,12 @@ ovn_northd_lb_destroy(struct ovn_northd_lb *lb)
     }
     free(lb->vips);
     free(lb->vips_nb);
+    smap_destroy(&lb->template_vips);
     sset_destroy(&lb->ips_v4);
     sset_destroy(&lb->ips_v6);
     free(lb->selection_fields);
-    free(lb->nb_lr);
-    free(lb->nb_ls);
+    bitmap_free(lb->nb_lr_map);
+    bitmap_free(lb->nb_ls_map);
     free(lb);
 }
 
@@ -741,6 +781,15 @@ ovn_controller_lb_create(const struct sbrec_load_balancer *sbrec_lb,
         lex_str_free(&value_s);
     }
 
+    lb->proto = IPPROTO_TCP;
+    if (sbrec_lb->protocol && sbrec_lb->protocol[0]) {
+        if (!strcmp(sbrec_lb->protocol, "udp")) {
+            lb->proto = IPPROTO_UDP;
+        } else if (!strcmp(sbrec_lb->protocol, "sctp")) {
+            lb->proto = IPPROTO_SCTP;
+        }
+    }
+
     /* It's possible that parsing VIPs fails.  Update the lb->n_vips to the
      * correct value.
      */
@@ -763,4 +812,97 @@ ovn_controller_lb_destroy(struct ovn_controller_lb *lb)
     free(lb->vips);
     destroy_lport_addresses(&lb->hairpin_snat_ips);
     free(lb);
+}
+
+void
+ovn_controller_lbs_destroy(struct hmap *ovn_controller_lbs)
+{
+    struct ovn_controller_lb *lb;
+    HMAP_FOR_EACH_POP (lb, hmap_node, ovn_controller_lbs) {
+        ovn_controller_lb_destroy(lb);
+    }
+
+    hmap_destroy(ovn_controller_lbs);
+}
+
+struct ovn_controller_lb *
+ovn_controller_lb_find(const struct hmap *ovn_controller_lbs,
+                       const struct uuid *uuid)
+{
+    struct ovn_controller_lb *lb;
+    size_t hash = uuid_hash(uuid);
+    HMAP_FOR_EACH_WITH_HASH (lb, hmap_node, hash, ovn_controller_lbs) {
+        if (uuid_equals(&lb->slb->header_.uuid, uuid)) {
+            return lb;
+        }
+    }
+    return NULL;
+}
+
+static uint32_t
+ovn_lb_5tuple_hash(const struct ovn_lb_5tuple *tuple)
+{
+    uint32_t hash = 0;
+
+    hash = hash_add_in6_addr(hash, &tuple->vip_ip);
+    hash = hash_add_in6_addr(hash, &tuple->backend_ip);
+
+    hash = hash_add(hash, tuple->vip_port);
+    hash = hash_add(hash, tuple->backend_port);
+
+    hash = hash_add(hash, tuple->proto);
+
+    return hash_finish(hash, 0);
+
+}
+
+void
+ovn_lb_5tuple_init(struct ovn_lb_5tuple *tuple, const struct ovn_lb_vip *vip,
+                   const struct ovn_lb_backend *backend, uint8_t proto)
+{
+    tuple->vip_ip = vip->vip;
+    tuple->vip_port = vip->vip_port;
+    tuple->backend_ip = backend->ip;
+    tuple->backend_port = backend->port;
+    tuple->proto = vip->vip_port ? proto : 0;
+}
+
+void
+ovn_lb_5tuple_add(struct hmap *tuples, const struct ovn_lb_vip *vip,
+                  const struct ovn_lb_backend *backend, uint8_t proto)
+{
+    struct ovn_lb_5tuple *tuple = xmalloc(sizeof *tuple);
+    ovn_lb_5tuple_init(tuple, vip, backend, proto);
+    hmap_insert(tuples, &tuple->hmap_node, ovn_lb_5tuple_hash(tuple));
+}
+
+void
+ovn_lb_5tuple_find_and_delete(struct hmap *tuples,
+                              const struct ovn_lb_5tuple *tuple)
+{
+    uint32_t hash = ovn_lb_5tuple_hash(tuple);
+
+    struct ovn_lb_5tuple *node;
+    HMAP_FOR_EACH_WITH_HASH (node, hmap_node, hash, tuples) {
+        if (ipv6_addr_equals(&tuple->vip_ip, &node->vip_ip) &&
+            ipv6_addr_equals(&tuple->backend_ip, &node->backend_ip) &&
+            tuple->vip_port == node->vip_port &&
+            tuple->backend_port == node->backend_port &&
+            tuple->proto == node->proto) {
+            hmap_remove(tuples, &node->hmap_node);
+            free(node);
+            return;
+        }
+    }
+}
+
+void
+ovn_lb_5tuples_destroy(struct hmap *tuples)
+{
+    struct ovn_lb_5tuple *tuple;
+    HMAP_FOR_EACH_POP (tuple, hmap_node, tuples) {
+        free(tuple);
+    }
+
+    hmap_destroy(tuples);
 }

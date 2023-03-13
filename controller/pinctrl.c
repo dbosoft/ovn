@@ -181,9 +181,8 @@ static struct pinctrl pinctrl;
 static void init_buffered_packets_map(void);
 static void destroy_buffered_packets_map(void);
 static void
-run_buffered_binding(struct ovsdb_idl_index *sbrec_mac_binding_by_lport_ip,
-                     struct ovsdb_idl_index *sbrec_port_binding_by_datapath,
-                     const struct hmap *local_datapaths)
+run_buffered_binding(struct ovsdb_idl_index *sbrec_port_binding_by_name,
+                     const struct sbrec_mac_binding_table *mac_binding_table)
     OVS_REQUIRES(pinctrl_mutex);
 
 static void pinctrl_handle_put_mac_binding(const struct flow *md,
@@ -1419,7 +1418,6 @@ prepare_ipv6_prefixd(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
 struct buffer_info {
     struct ofpbuf ofpacts;
-    ofp_port_t ofp_port;
     struct dp_packet *p;
 };
 
@@ -1431,6 +1429,9 @@ struct buffered_packets {
     /* key */
     struct in6_addr ip;
     struct eth_addr ea;
+
+    uint64_t dp_key;
+    uint64_t port_key;
 
     long long int timestamp;
 
@@ -1495,7 +1496,6 @@ buffered_push_packet(struct buffered_packets *bp,
     union mf_value pkt_mark_value;
     mf_get_value(pkt_mark_field, &md->flow, &pkt_mark_value);
     ofpact_put_set_field(&bi->ofpacts, pkt_mark_field, &pkt_mark_value, NULL);
-    bi->ofp_port = md->flow.in_port.ofp_port;
 
     struct ofpact_resubmit *resubmit = ofpact_put_RESUBMIT(&bi->ofpacts);
     resubmit->in_port = OFPP_CONTROLLER;
@@ -1531,7 +1531,7 @@ buffered_send_packets(struct rconn *swconn, struct buffered_packets *bp,
             .ofpacts = bi->ofpacts.data,
             .ofpacts_len = bi->ofpacts.size,
         };
-        match_set_in_port(&po.flow_metadata, bi->ofp_port);
+        match_set_in_port(&po.flow_metadata, OFPP_CONTROLLER);
         queue_msg(swconn, ofputil_encode_packet_out(&po, proto));
 
         ofpbuf_uninit(&bi->ofpacts);
@@ -1557,18 +1557,38 @@ buffered_packets_map_gc(void)
     }
 }
 
+static uint32_t
+pinctrl_buffer_packet_hash(uint64_t dp_key, uint64_t port_key,
+                           const struct in6_addr *addr)
+{
+    uint32_t hash = 0;
+    hash = hash_add64(hash, port_key);
+    hash = hash_add64(hash, dp_key);
+    hash = hash_bytes(addr, sizeof addr, hash);
+    return hash_finish(hash, 16);
+}
+
 static struct buffered_packets *
-pinctrl_find_buffered_packets(const struct in6_addr *ip, uint32_t hash)
+pinctrl_find_buffered_packets(uint64_t dp_key, uint64_t port_key,
+                              const struct in6_addr *ip, uint32_t hash)
 {
     struct buffered_packets *qp;
-
-    HMAP_FOR_EACH_WITH_HASH (qp, hmap_node, hash,
-                             &buffered_packets_map) {
-        if (IN6_ARE_ADDR_EQUAL(&qp->ip, ip)) {
+    HMAP_FOR_EACH_WITH_HASH (qp, hmap_node, hash, &buffered_packets_map) {
+        if (qp->dp_key == dp_key && qp->port_key == port_key &&
+            IN6_ARE_ADDR_EQUAL(&qp->ip, ip)) {
             return qp;
         }
     }
     return NULL;
+}
+
+static struct buffered_packets *
+pinctrl_find_buffered_packets_with_hash(uint64_t dp_key, uint64_t port_key,
+                                        const struct in6_addr *ip)
+{
+    uint32_t hash = pinctrl_buffer_packet_hash(dp_key, port_key, ip);
+
+    return pinctrl_find_buffered_packets(dp_key, port_key, ip, hash);
 }
 
 /* Called with in the pinctrl_handler thread context. */
@@ -1580,6 +1600,8 @@ pinctrl_handle_buffered_packets(struct dp_packet *pkt_in,
     struct buffered_packets *bp;
     struct dp_packet *clone;
     struct in6_addr addr;
+    uint64_t dp_key = ntohll(md->flow.metadata);
+    uint64_t oport_key = md->flow.regs[MFF_LOG_OUTPORT - MFF_REG0];
 
     if (is_arp) {
         addr = in6_addr_mapped_ipv4(htonl(md->flow.regs[0]));
@@ -1588,8 +1610,8 @@ pinctrl_handle_buffered_packets(struct dp_packet *pkt_in,
         memcpy(&addr, &ip6, sizeof addr);
     }
 
-    uint32_t hash = hash_bytes(&addr, sizeof addr, 0);
-    bp = pinctrl_find_buffered_packets(&addr, hash);
+    uint32_t hash = pinctrl_buffer_packet_hash(dp_key, oport_key, &addr);
+    bp = pinctrl_find_buffered_packets(dp_key, oport_key, &addr, hash);
     if (!bp) {
         if (hmap_count(&buffered_packets_map) >= 1000) {
             COVERAGE_INC(pinctrl_drop_buffered_packets_map);
@@ -1600,6 +1622,8 @@ pinctrl_handle_buffered_packets(struct dp_packet *pkt_in,
         hmap_insert(&buffered_packets_map, &bp->hmap_node, hash);
         bp->head = bp->tail = 0;
         bp->ip = addr;
+        bp->dp_key = dp_key;
+        bp->port_key = oport_key;
     }
     bp->timestamp = time_msec();
     /* clone the packet to send it later with correct L2 address */
@@ -3574,6 +3598,7 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
             const struct sbrec_dns_table *dns_table,
             const struct sbrec_controller_event_table *ce_table,
             const struct sbrec_service_monitor_table *svc_mon_table,
+            const struct sbrec_mac_binding_table *mac_binding_table,
             const struct sbrec_bfd_table *bfd_table,
             const struct ovsrec_bridge *br_int,
             const struct sbrec_chassis *chassis,
@@ -3603,9 +3628,7 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
                   sbrec_port_binding_by_key,
                   sbrec_igmp_groups,
                   sbrec_ip_multicast_opts);
-    run_buffered_binding(sbrec_mac_binding_by_lport_ip,
-                         sbrec_port_binding_by_datapath,
-                         local_datapaths);
+    run_buffered_binding(sbrec_port_binding_by_name, mac_binding_table);
     sync_svc_monitors(ovnsb_idl_txn, svc_mon_table, sbrec_port_binding_by_name,
                       chassis);
     bfd_monitor_run(ovnsb_idl_txn, bfd_table, sbrec_port_binding_by_name,
@@ -3752,12 +3775,12 @@ ipv6_ra_update_config(const struct sbrec_port_binding *pb)
 
     const char *dnssl = smap_get(&pb->options, "ipv6_ra_dnssl");
     if (dnssl) {
-        ds_put_buffer(&config->dnssl, dnssl, strlen(dnssl));
+        ds_put_cstr(&config->dnssl, dnssl);
     }
 
     const char *route_info = smap_get(&pb->options, "ipv6_ra_route_info");
     if (route_info) {
-        ds_put_buffer(&config->route_info, route_info, strlen(route_info));
+        ds_put_cstr(&config->route_info, route_info);
     }
 
     return config;
@@ -4379,49 +4402,64 @@ run_put_mac_bindings(struct ovsdb_idl_txn *ovnsb_idl_txn,
 }
 
 static void
-run_buffered_binding(struct ovsdb_idl_index *sbrec_mac_binding_by_lport_ip,
-                     struct ovsdb_idl_index *sbrec_port_binding_by_datapath,
-                     const struct hmap *local_datapaths)
+run_buffered_binding(struct ovsdb_idl_index *sbrec_port_binding_by_name,
+                     const struct sbrec_mac_binding_table *mac_binding_table)
     OVS_REQUIRES(pinctrl_mutex)
 {
-    const struct local_datapath *ld;
     bool notify = false;
 
-    HMAP_FOR_EACH (ld, hmap_node, local_datapaths) {
-        /* MAC_Binding.logical_port will always belong to a
-         * a router datapath. Hence we can skip logical switch
-         * datapaths.
-         * */
-        if (ld->is_switch) {
+    if (!hmap_count(&buffered_packets_map)) {
+        return;
+    }
+
+    const struct sbrec_mac_binding *mb;
+    SBREC_MAC_BINDING_TABLE_FOR_EACH_TRACKED (mb, mac_binding_table) {
+        const struct sbrec_port_binding *pb = lport_lookup_by_name(
+            sbrec_port_binding_by_name, mb->logical_port);
+        if (!pb || !pb->datapath) {
             continue;
         }
 
-        struct sbrec_port_binding *target =
-            sbrec_port_binding_index_init_row(sbrec_port_binding_by_datapath);
-        sbrec_port_binding_index_set_datapath(target, ld->datapath);
-        const struct sbrec_port_binding *pb;
-        SBREC_PORT_BINDING_FOR_EACH_EQUAL (pb, target,
-                                           sbrec_port_binding_by_datapath) {
-            if (strcmp(pb->type, "patch") && strcmp(pb->type, "l3gateway")) {
+        struct in6_addr ip;
+        ovs_be32 ip4;
+        if (ip_parse(mb->ip, &ip4)) {
+            ip = in6_addr_mapped_ipv4(ip4);
+        } else if (!ipv6_parse(mb->ip, &ip)) {
+            continue;
+        }
+
+        struct buffered_packets *bp = pinctrl_find_buffered_packets_with_hash(
+                pb->datapath->tunnel_key, pb->tunnel_key, &ip);
+        if (!bp) {
+            if (!smap_get(&pb->options, "chassis-redirect-port")) {
                 continue;
             }
-            struct buffered_packets *cur_qp;
-            HMAP_FOR_EACH_SAFE (cur_qp, hmap_node, &buffered_packets_map) {
-                struct ds ip_s = DS_EMPTY_INITIALIZER;
-                ipv6_format_mapped(&cur_qp->ip, &ip_s);
-                const struct sbrec_mac_binding *b = mac_binding_lookup(
-                        sbrec_mac_binding_by_lport_ip, pb->logical_port,
-                        ds_cstr(&ip_s));
-                if (b && ovs_scan(b->mac, ETH_ADDR_SCAN_FMT,
-                                  ETH_ADDR_SCAN_ARGS(cur_qp->ea))) {
-                    hmap_remove(&buffered_packets_map, &cur_qp->hmap_node);
-                    ovs_list_push_back(&buffered_mac_bindings, &cur_qp->list);
-                    notify = true;
-                }
-                ds_destroy(&ip_s);
+
+            char *redirect_name = xasprintf("cr-%s", pb->logical_port);
+            pb = lport_lookup_by_name(sbrec_port_binding_by_name,
+                                      redirect_name);
+            free(redirect_name);
+
+            if (!pb || !pb->datapath || strcmp(pb->type, "chassisredirect")) {
+                continue;
             }
+
+            bp = pinctrl_find_buffered_packets_with_hash(
+                    pb->datapath->tunnel_key, pb->tunnel_key, &ip);
         }
-        sbrec_port_binding_index_destroy_row(target);
+
+        if (!bp) {
+            continue;
+        }
+
+        if (!ovs_scan(mb->mac, ETH_ADDR_SCAN_FMT,
+                      ETH_ADDR_SCAN_ARGS(bp->ea))) {
+            continue;
+        }
+
+        hmap_remove(&buffered_packets_map, &bp->hmap_node);
+        ovs_list_push_back(&buffered_mac_bindings, &bp->list);
+        notify = true;
     }
     buffered_packets_map_gc();
 
@@ -5787,7 +5825,7 @@ extract_addresses_with_port(const char *addresses,
     int ofs;
     if (!extract_addresses(addresses, laddrs, &ofs)) {
         return false;
-    } else if (ofs >= strlen(addresses)) {
+    } else if (!addresses[ofs]) {
         return true;
     }
 
@@ -6698,9 +6736,10 @@ sync_svc_monitors(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
         struct in6_addr ip_addr;
         ovs_be32 ip4;
-        if (ip_parse(sb_svc_mon->ip, &ip4)) {
+        bool is_ipv4 = ip_parse(sb_svc_mon->ip, &ip4);
+        if (is_ipv4) {
             ip_addr = in6_addr_mapped_ipv4(ip4);
-        } else {
+        } else if (!ipv6_parse(sb_svc_mon->ip, &ip_addr)) {
             continue;
         }
 
@@ -6713,16 +6752,27 @@ sync_svc_monitors(struct ovsdb_idl_txn *ovnsb_idl_txn,
                 continue;
             }
 
-            for (size_t j = 0; j < laddrs.n_ipv4_addrs; j++) {
-                if (ip4 == laddrs.ipv4_addrs[j].addr) {
-                    ea = laddrs.ea;
-                    mac_found = true;
-                    break;
+            if (is_ipv4) {
+                for (size_t j = 0; j < laddrs.n_ipv4_addrs; j++) {
+                    if (ip4 == laddrs.ipv4_addrs[j].addr) {
+                        ea = laddrs.ea;
+                        mac_found = true;
+                        break;
+                    }
+                }
+            } else {
+                for (size_t j = 0; j < laddrs.n_ipv6_addrs; j++) {
+                    if (IN6_ARE_ADDR_EQUAL(&ip_addr,
+                                           &laddrs.ipv6_addrs[j].addr)) {
+                        ea = laddrs.ea;
+                        mac_found = true;
+                        break;
+                    }
                 }
             }
 
-            if (!mac_found && !laddrs.n_ipv4_addrs) {
-                /* IPv4 address(es) are not configured. Use the first mac. */
+            if (!mac_found && !laddrs.n_ipv4_addrs && !laddrs.n_ipv6_addrs) {
+                /* IP address(es) are not configured. Use the first mac. */
                 ea = laddrs.ea;
                 mac_found = true;
             }
@@ -6756,7 +6806,7 @@ sync_svc_monitors(struct ovsdb_idl_txn *ovnsb_idl_txn,
             svc_mon->port_key = port_key;
             svc_mon->proto_port = sb_svc_mon->port;
             svc_mon->ip = ip_addr;
-            svc_mon->is_ip6 = false;
+            svc_mon->is_ip6 = !is_ipv4;
             svc_mon->state = SVC_MON_S_INIT;
             svc_mon->status = SVC_MON_ST_UNKNOWN;
             svc_mon->protocol = protocol;
@@ -7524,26 +7574,30 @@ svc_monitor_send_tcp_health_check__(struct rconn *swconn,
                                     ovs_be32 tcp_ack,
                                     ovs_be16 tcp_src)
 {
-    if (svc_mon->is_ip6) {
-        return;
-    }
-
     /* Compose a TCP-SYN packet. */
     uint64_t packet_stub[128 / 8];
     struct dp_packet packet;
+    dp_packet_use_stub(&packet, packet_stub, sizeof packet_stub);
 
     struct eth_addr eth_src;
     eth_addr_from_string(svc_mon->sb_svc_mon->src_mac, &eth_src);
-    ovs_be32 ip4_src;
-    ip_parse(svc_mon->sb_svc_mon->src_ip, &ip4_src);
-
-    dp_packet_use_stub(&packet, packet_stub, sizeof packet_stub);
-    pinctrl_compose_ipv4(&packet, eth_src, svc_mon->ea,
-                         ip4_src, in6_addr_get_mapped_ipv4(&svc_mon->ip),
-                         IPPROTO_TCP, 63, TCP_HEADER_LEN);
+    if (svc_mon->is_ip6) {
+        struct in6_addr ip6_src;
+        ipv6_parse(svc_mon->sb_svc_mon->src_ip, &ip6_src);
+        pinctrl_compose_ipv6(&packet, eth_src, svc_mon->ea,
+                             &ip6_src, &svc_mon->ip, IPPROTO_TCP,
+                             63, TCP_HEADER_LEN);
+    } else {
+        ovs_be32 ip4_src;
+        ip_parse(svc_mon->sb_svc_mon->src_ip, &ip4_src);
+        pinctrl_compose_ipv4(&packet, eth_src, svc_mon->ea,
+                             ip4_src, in6_addr_get_mapped_ipv4(&svc_mon->ip),
+                             IPPROTO_TCP, 63, TCP_HEADER_LEN);
+    }
 
     struct tcp_header *th = dp_packet_l4(&packet);
     dp_packet_set_l4(&packet, th);
+    th->tcp_csum = 0;
     th->tcp_dst = htons(svc_mon->proto_port);
     th->tcp_src = tcp_src;
 
@@ -7554,7 +7608,11 @@ svc_monitor_send_tcp_health_check__(struct rconn *swconn,
     th->tcp_winsz = htons(65160);
 
     uint32_t csum;
-    csum = packet_csum_pseudoheader(dp_packet_l3(&packet));
+    if (svc_mon->is_ip6) {
+        csum = packet_csum_pseudoheader6(dp_packet_l3(&packet));
+    } else {
+        csum = packet_csum_pseudoheader(dp_packet_l3(&packet));
+    }
     csum = csum_continue(csum, th, dp_packet_size(&packet) -
                          ((const unsigned char *)th -
                          (const unsigned char *)dp_packet_eth(&packet)));
@@ -7589,21 +7647,26 @@ svc_monitor_send_udp_health_check(struct rconn *swconn,
                                   struct svc_monitor *svc_mon,
                                   ovs_be16 udp_src)
 {
-    if (svc_mon->is_ip6) {
-        return;
-    }
-
     struct eth_addr eth_src;
     eth_addr_from_string(svc_mon->sb_svc_mon->src_mac, &eth_src);
-    ovs_be32 ip4_src;
-    ip_parse(svc_mon->sb_svc_mon->src_ip, &ip4_src);
 
     uint64_t packet_stub[128 / 8];
     struct dp_packet packet;
     dp_packet_use_stub(&packet, packet_stub, sizeof packet_stub);
-    pinctrl_compose_ipv4(&packet, eth_src, svc_mon->ea,
-                         ip4_src, in6_addr_get_mapped_ipv4(&svc_mon->ip),
-                         IPPROTO_UDP, 63, UDP_HEADER_LEN + 8);
+
+    if (svc_mon->is_ip6) {
+        struct in6_addr ip6_src;
+        ipv6_parse(svc_mon->sb_svc_mon->src_ip, &ip6_src);
+        pinctrl_compose_ipv6(&packet, eth_src, svc_mon->ea,
+                             &ip6_src, &svc_mon->ip, IPPROTO_UDP,
+                             63, UDP_HEADER_LEN + 8);
+    } else {
+        ovs_be32 ip4_src;
+        ip_parse(svc_mon->sb_svc_mon->src_ip, &ip4_src);
+        pinctrl_compose_ipv4(&packet, eth_src, svc_mon->ea,
+                             ip4_src, in6_addr_get_mapped_ipv4(&svc_mon->ip),
+                             IPPROTO_UDP, 63, UDP_HEADER_LEN + 8);
+    }
 
     struct udp_header *uh = dp_packet_l4(&packet);
     dp_packet_set_l4(&packet, uh);
@@ -7611,6 +7674,16 @@ svc_monitor_send_udp_health_check(struct rconn *swconn,
     uh->udp_src = udp_src;
     uh->udp_len = htons(UDP_HEADER_LEN + 8);
     uh->udp_csum = 0;
+    if (svc_mon->is_ip6) {
+        uint32_t csum = packet_csum_pseudoheader6(dp_packet_l3(&packet));
+        csum = csum_continue(csum, uh, dp_packet_size(&packet) -
+                             ((const unsigned char *) uh -
+                              (const unsigned char *) dp_packet_eth(&packet)));
+        uh->udp_csum = csum_finish(csum);
+        if (!uh->udp_csum) {
+            uh->udp_csum = htons(0xffff);
+        }
+    }
 
     uint64_t ofpacts_stub[4096 / 8];
     struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(ofpacts_stub);
@@ -7803,32 +7876,38 @@ pinctrl_handle_svc_check(struct rconn *swconn, const struct flow *ip_flow,
     uint32_t port_key = md->flow.regs[MFF_LOG_INPORT - MFF_REG0];
     struct in6_addr ip_addr;
     struct eth_header *in_eth = dp_packet_data(pkt_in);
-    struct ip_header *in_ip = dp_packet_l3(pkt_in);
+    uint8_t ip_proto;
 
-    if (in_ip->ip_proto != IPPROTO_TCP && in_ip->ip_proto != IPPROTO_ICMP) {
+    if (in_eth->eth_type == htons(ETH_TYPE_IP)) {
+        struct ip_header *in_ip = dp_packet_l3(pkt_in);
+        uint16_t in_ip_len = ntohs(in_ip->ip_tot_len);
+        if (in_ip_len < IP_HEADER_LEN) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+            VLOG_WARN_RL(&rl,
+                         "IP packet with invalid length (%u)",
+                         in_ip_len);
+            return;
+        }
+
+        ip_addr = in6_addr_mapped_ipv4(ip_flow->nw_src);
+        ip_proto = in_ip->ip_proto;
+    } else {
+        struct ovs_16aligned_ip6_hdr *in_ip = dp_packet_l3(pkt_in);
+        ip_addr = ip_flow->ipv6_src;
+        ip_proto = in_ip->ip6_nxt;
+    }
+
+    if (ip_proto != IPPROTO_TCP && ip_proto != IPPROTO_ICMP &&
+        ip_proto != IPPROTO_ICMPV6) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
         VLOG_WARN_RL(&rl,
                      "handle service check: Unsupported protocol - [%x]",
-                     in_ip->ip_proto);
+                     ip_proto);
         return;
     }
 
-    uint16_t in_ip_len = ntohs(in_ip->ip_tot_len);
-    if (in_ip_len < IP_HEADER_LEN) {
-        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
-        VLOG_WARN_RL(&rl,
-                     "IP packet with invalid length (%u)",
-                     in_ip_len);
-        return;
-    }
 
-    if (in_eth->eth_type == htons(ETH_TYPE_IP)) {
-        ip_addr = in6_addr_mapped_ipv4(ip_flow->nw_src);
-    } else {
-        ip_addr = ip_flow->ipv6_dst;
-    }
-
-    if (in_ip->ip_proto == IPPROTO_TCP) {
+    if (ip_proto == IPPROTO_TCP) {
         uint32_t hash =
             hash_bytes(&ip_addr, sizeof ip_addr,
                        hash_3words(dp_key, port_key, ntohs(ip_flow->tp_src)));
@@ -7845,44 +7924,68 @@ pinctrl_handle_svc_check(struct rconn *swconn, const struct flow *ip_flow,
         }
         pinctrl_handle_tcp_svc_check(swconn, pkt_in, svc_mon);
     } else {
-        /* It's ICMP packet. */
-        struct icmp_header *ih = dp_packet_l4(pkt_in);
-        if (!ih) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
-            VLOG_WARN_RL(&rl, "ICMPv4 packet with invalid header");
-            return;
-        }
-
-        if (ih->icmp_type != ICMP4_DST_UNREACH || ih->icmp_code != 3) {
-            return;
-        }
-
+        struct udp_header *orig_uh;
         const char *end =
             (char *)dp_packet_l4(pkt_in) + dp_packet_l4_size(pkt_in);
 
-        const struct ip_header *orig_ip_hr =
-            dp_packet_get_icmp_payload(pkt_in);
-        if (!orig_ip_hr) {
+        void *l4h = dp_packet_l4(pkt_in);
+        if (!l4h) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+            VLOG_WARN_RL(&rl, "ICMP packet with invalid header");
+            return;
+        }
+
+        const void *in_ip = dp_packet_get_icmp_payload(pkt_in);
+        if (!in_ip) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
             VLOG_WARN_RL(&rl, "Original IP datagram not present in "
                          "ICMP packet");
             return;
         }
 
-        if (ntohs(orig_ip_hr->ip_tot_len) !=
-            (IP_HEADER_LEN + UDP_HEADER_LEN + 8)) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
-            VLOG_WARN_RL(&rl, "Invalid original IP datagram length present "
-                         "in ICMP packet");
-            return;
-        }
+        if (in_eth->eth_type == htons(ETH_TYPE_IP)) {
+            struct icmp_header *ih = l4h;
+            /* It's ICMP packet. */
+            if (ih->icmp_type != ICMP4_DST_UNREACH || ih->icmp_code != 3) {
+                return;
+            }
 
-        struct udp_header *orig_uh = (struct udp_header *) (orig_ip_hr + 1);
-        if ((char *)orig_uh >= end) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
-            VLOG_WARN_RL(&rl, "Invalid UDP header in the original "
-                         "IP datagram");
-            return;
+            const struct ip_header *orig_ip_hr = in_ip;
+            if (ntohs(orig_ip_hr->ip_tot_len) !=
+                (IP_HEADER_LEN + UDP_HEADER_LEN + 8)) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+                VLOG_WARN_RL(&rl, "Invalid original IP datagram length "
+                             "present in ICMP packet");
+                return;
+            }
+
+            orig_uh = (struct udp_header *) (orig_ip_hr + 1);
+            if ((char *) orig_uh >= end) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+                VLOG_WARN_RL(&rl, "Invalid UDP header in the original "
+                             "IP datagram");
+                return;
+            }
+        } else {
+            struct icmp6_header *ih6 = l4h;
+            if (ih6->icmp6_type != 1 || ih6->icmp6_code != 4) {
+                return;
+            }
+
+            const struct ovs_16aligned_ip6_hdr *ip6_hdr = in_ip;
+            if (ntohs(ip6_hdr->ip6_plen) != UDP_HEADER_LEN + 8) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+                VLOG_WARN_RL(&rl, "Invalid original IP datagram length "
+                             "present in ICMP packet");
+            }
+
+            orig_uh = (struct udp_header *) (ip6_hdr + 1);
+            if ((char *) orig_uh >= end) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+                VLOG_WARN_RL(&rl, "Invalid UDP header in the original "
+                             "IP datagram");
+                return;
+            }
         }
 
         uint32_t hash =

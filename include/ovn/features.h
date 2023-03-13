@@ -24,6 +24,7 @@
 #define OVN_FEATURE_PORT_UP_NOTIF      "port-up-notif"
 #define OVN_FEATURE_CT_NO_MASKED_LABEL "ct-no-masked-label"
 #define OVN_FEATURE_MAC_BINDING_TIMESTAMP "mac-binding-timestamp"
+#define OVN_FEATURE_CT_LB_RELATED "ovn-ct-lb-related"
 
 /* OVS datapath supported features.  Based on availability OVN might generate
  * different types of openflows.
@@ -31,11 +32,13 @@
 enum ovs_feature_support_bits {
     OVS_CT_ZERO_SNAT_SUPPORT_BIT,
     OVS_DP_METER_SUPPORT_BIT,
+    OVS_CT_TUPLE_FLUSH_BIT,
 };
 
 enum ovs_feature_value {
     OVS_CT_ZERO_SNAT_SUPPORT = (1 << OVS_CT_ZERO_SNAT_SUPPORT_BIT),
     OVS_DP_METER_SUPPORT = (1 << OVS_DP_METER_SUPPORT_BIT),
+    OVS_CT_TUPLE_FLUSH_SUPPORT = (1 << OVS_CT_TUPLE_FLUSH_BIT),
 };
 
 void ovs_feature_support_destroy(void);

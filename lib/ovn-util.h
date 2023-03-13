@@ -28,15 +28,16 @@
 #define ROUTE_ORIGIN_CONNECTED "connected"
 #define ROUTE_ORIGIN_STATIC "static"
 
+struct eth_addr;
 struct nbrec_logical_router_port;
+struct ovsrec_flow_sample_collector_set_table;
+struct sbrec_datapath_binding;
 struct sbrec_logical_flow;
+struct sbrec_port_binding;
+struct smap;
 struct svec;
 struct uuid;
-struct eth_addr;
-struct sbrec_port_binding;
-struct sbrec_datapath_binding;
 struct unixctl_conn;
-struct smap;
 
 struct ipv4_netaddr {
     ovs_be32 addr;            /* 192.168.10.123 */
@@ -69,6 +70,23 @@ struct lport_addresses {
     size_t n_ipv6_addrs;
     struct ipv6_netaddr *ipv6_addrs;
 };
+
+static inline bool
+ipv6_is_all_router(const struct in6_addr *addr)
+{
+    return ipv6_addr_equals(addr, &in6addr_all_routers);
+}
+
+static const struct in6_addr in6addr_all_site_routers = {{{
+    0xff,0x05,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02
+}}};
+
+static inline bool
+ipv6_is_all_site_router(const struct in6_addr *addr)
+{
+    return ipv6_addr_equals(addr, &in6addr_all_site_routers);
+}
 
 bool is_dynamic_lsp_address(const char *address);
 bool extract_addresses(const char *address, struct lport_addresses *,
@@ -318,11 +336,6 @@ bool ip_address_and_port_from_lb_key(const char *key, char **ip_address,
  * value. */
 char *ovn_get_internal_version(void);
 
-/* Parse the provided internal version string and return the "minor" part which
- * is expected to be an unsigned integer followed by the last "." in the
- * string. Returns 0 if the string can't be parsed. */
-unsigned int ovn_parse_internal_version_minor(const char *ver);
-
 /* OVN Packet definitions. These may eventually find a home in OVS's
  * packets.h file. For the time being, they live here because OVN uses them
  * and OVS does not.
@@ -365,6 +378,23 @@ void ddlog_warn(const char *msg);
 void ddlog_err(const char *msg);
 #endif
 
+static inline uint32_t
+hash_add_in6_addr(uint32_t hash, const struct in6_addr *addr)
+{
+    for (uint8_t i = 0; i < 4; i++) {
+#ifdef s6_addr32
+        hash = hash_add(hash, addr->s6_addr32[i]);
+#else
+        uint8_t index = i * 4;
+        uint32_t part = (uint32_t) addr->s6_addr[index]
+            | (uint32_t) addr->s6_addr[index + 1] << 8
+            | (uint32_t) addr->s6_addr[index + 2] << 16
+            | (uint32_t) addr->s6_addr[index + 3] << 24;
+        hash = hash_add(hash, part);
+#endif
+    }
+    return hash;
+}
 
 /* Must be a bit-field ordered from most-preferred (higher number) to
  * least-preferred (lower number). */
@@ -387,5 +417,48 @@ int64_t daemon_startup_ts(void);
 
 char *lr_lb_address_set_name(uint32_t lr_tunnel_key, int addr_family);
 char *lr_lb_address_set_ref(uint32_t lr_tunnel_key, int addr_family);
+
+const char *
+get_chassis_external_id_value(const struct smap *,
+                              const char *chassis_id,
+                              const char *option_key,
+                              const char *def);
+int
+get_chassis_external_id_value_int(const struct smap *,
+                                  const char *chassis_id,
+                                  const char *option_key,
+                                  int def);
+unsigned int
+get_chassis_external_id_value_uint(const struct smap *,
+                                   const char *chassis_id,
+                                   const char *option_key,
+                                   unsigned int def);
+unsigned long long int
+get_chassis_external_id_value_ullong(const struct smap *external_ids,
+                                     const char *chassis_id,
+                                     const char *option_key,
+                                     unsigned long long int def);
+bool
+get_chassis_external_id_value_bool(const struct smap *,
+                                   const char *chassis_id,
+                                   const char *option_key,
+                                   bool def);
+
+/* flow_collector_ids is a helper struct used to store and lookup
+ * Flow_Sample_Collector_Set ids. */
+struct flow_collector_id {
+    struct ovs_list node;  /* In flow_collector_ids->list */
+    uint64_t id;
+};
+struct flow_collector_ids {
+    struct ovs_list list;
+};
+void flow_collector_ids_init(struct flow_collector_ids *);
+void flow_collector_ids_init_from_table(struct flow_collector_ids *,
+    const struct ovsrec_flow_sample_collector_set_table *);
+void flow_collector_ids_add(struct flow_collector_ids *, uint64_t);
+bool flow_collector_ids_lookup(const struct flow_collector_ids *, uint32_t);
+void flow_collector_ids_destroy(struct flow_collector_ids *);
+void flow_collector_ids_clear(struct flow_collector_ids *);
 
 #endif /* OVN_UTIL_H */

@@ -1,28 +1,23 @@
 ARG OVNKUBE_COMMIT=master
-ARG LIBOVSDB_COMMIT=8081fe24e48f
+ARG LIBOVSDB_COMMIT=a6a173993830
 
-FROM fedora:35 AS ovnbuilder
+FROM fedora:37 AS ovnbuilder
 
 USER root
 
 ENV PYTHONDONTWRITEBYTECODE yes
 
 # install needed rpms - openvswitch must be 2.10.4 or higher
-RUN INSTALL_PKGS=" \
-    python3-pyyaml bind-utils procps-ng openssl numactl-libs firewalld-filesystem \
-    libpcap hostname desktop-file-utils \
-    python3-openvswitch python3-pyOpenSSL \
-    autoconf automake libtool g++ gcc fedora-packager rpmdevtools \
-    unbound unbound-devel groff python3-sphinx graphviz openssl openssl-devel \
-    checkpolicy libcap-ng-devel selinux-policy-devel" && \
-    dnf install --best --refresh -y --setopt=tsflags=nodocs $INSTALL_PKGS && \
-    dnf clean all && rm -rf /var/cache/dnf/*
+RUN INSTALL_PKGS=" rpm-build dnf-plugins-core" && \
+    dnf install --best --refresh -y --setopt=tsflags=nodocs $INSTALL_PKGS
 
 # Build OVS and OVN rpms from current folder
 RUN mkdir /tmp/ovn
 COPY . /tmp/ovn
 WORKDIR /tmp/ovn/ovs
 
+RUN sed -e 's/@VERSION@/0.0.1/' rhel/openvswitch-fedora.spec.in > /tmp/ovs.spec
+RUN dnf builddep -y /tmp/ovs.spec
 RUN ./boot.sh
 RUN ./configure -v
 RUN make rpm-fedora
@@ -30,6 +25,8 @@ RUN rm rpm/rpmbuild/RPMS/x86_64/*debug*
 RUN rm rpm/rpmbuild/RPMS/x86_64/*devel*
 
 WORKDIR /tmp/ovn
+RUN sed -e 's/@VERSION@/0.0.1/' rhel/ovn-fedora.spec.in > /tmp/ovn.spec
+RUN dnf builddep -y /tmp/ovn.spec
 RUN ./boot.sh
 RUN ./configure
 RUN make rpm-fedora
@@ -47,22 +44,29 @@ RUN GO111MODULE=on go install github.com/ovn-org/libovsdb/cmd/modelgen@${LIBOVSD
 # Clone OVN Kubernetes and build the binary based on the commit passed as argument
 WORKDIR /root
 RUN git clone https://github.com/ovn-org/ovn-kubernetes.git
-WORKDIR /root/ovn-kubernetes/go-controller
+WORKDIR /root/ovn-kubernetes
 RUN git checkout ${OVNKUBE_COMMIT} && git log -n 1
 
+# Copy the ovn-kubernetes scripts from the OVN sources and apply any
+# custom changes if needed.
+RUN mkdir -p /tmp/ovn/.ci/ovn-kubernetes
+COPY .ci/ovn-kubernetes /tmp/ovn/.ci/ovn-kubernetes
+WORKDIR /tmp/ovn
+RUN .ci/ovn-kubernetes/prepare.sh /root/ovn-kubernetes
+
+WORKDIR /root/ovn-kubernetes/go-controller
 # Make sure we use the OVN NB/SB schema from the local code.
 COPY --from=ovnbuilder /tmp/ovn/ovn-nb.ovsschema pkg/nbdb/ovn-nb.ovsschema
 COPY --from=ovnbuilder /tmp/ovn/ovn-sb.ovsschema pkg/sbdb/ovn-sb.ovsschema
 RUN go generate ./pkg/nbdb && go generate ./pkg/sbdb && make
 
 # Build the final image
-FROM fedora:35
+FROM fedora:37
 
 # install needed dependencies
 RUN INSTALL_PKGS=" \
     iptables iproute iputils hostname unbound-libs kubernetes-client kmod socat" && \
-    dnf install --best --refresh -y --setopt=tsflags=nodocs $INSTALL_PKGS && \
-    dnf clean all && rm -rf /var/cache/dnf/*
+    dnf install --best --refresh -y --setopt=tsflags=nodocs $INSTALL_PKGS
 
 RUN mkdir -p /var/run/openvswitch
 
@@ -84,6 +88,10 @@ COPY --from=ovnkubebuilder /root/ovn-kubernetes/go-controller/_output/go/bin/ovn
 COPY --from=ovnkubebuilder /root/ovn-kubernetes/dist/images/ovnkube.sh /root/
 COPY --from=ovnkubebuilder /root/ovn-kubernetes/dist/images/ovndb-raft-functions.sh /root/
 COPY --from=ovnkubebuilder /root/ovn-kubernetes/dist/images/iptables-scripts /usr/sbin/
+
+# Make some room.
+RUN REMOVE_PKGS="llvm-libs clang-libs" && \
+    dnf remove -y $REMOVE_PKGS && dnf clean all && rm -rf /var/cache/dnf/*
 
 LABEL io.k8s.display-name="ovn-kubernetes" \
     io.k8s.description="This is a Kubernetes network plugin that provides an overlay network using OVN." \

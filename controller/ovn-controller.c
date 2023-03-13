@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,6 +38,7 @@
 #include "if-status.h"
 #include "ip-mcast.h"
 #include "openvswitch/hmap.h"
+#include "lb.h"
 #include "lflow.h"
 #include "lflow-cache.h"
 #include "lflow-conj-ids.h"
@@ -55,6 +57,7 @@
 #include "lib/ip-mcast-index.h"
 #include "lib/mac-binding-index.h"
 #include "lib/mcast-group-index.h"
+#include "lib/ovn-dirs.h"
 #include "lib/ovn-sb-idl.h"
 #include "lib/ovn-util.h"
 #include "patch.h"
@@ -78,6 +81,7 @@
 #include "lib/inc-proc-eng.h"
 #include "lib/ovn-l7.h"
 #include "hmapx.h"
+#include "mirror.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
 
@@ -152,6 +156,44 @@ struct pending_pkt {
 
 /* Registered ofctrl seqno type for nb_cfg propagation. */
 static size_t ofctrl_seq_type_nb_cfg;
+
+static void
+remove_newline(char *s)
+{
+    char *last = &s[strlen(s) - 1];
+    switch (*last) {
+    case '\n':
+    case '\r':
+        *last = '\0';
+    default:
+        return;
+    }
+}
+
+static char *get_file_system_id(void)
+{
+    char *ret = NULL;
+    char *filename = xasprintf("%s/system-id-override", ovn_sysconfdir());
+    errno = 0;
+    FILE *f = fopen(filename, "r");
+    if (f) {
+        char system_id[64];
+        if (fgets(system_id, sizeof system_id, f)) {
+            remove_newline(system_id);
+            ret = xstrdup(system_id);
+        }
+        fclose(f);
+    }
+    free(filename);
+    return ret;
+}
+/* Only set monitor conditions on tables that are available in the
+ * server schema.
+ */
+#define sb_table_set_monitor_condition(idl, table, cond)   \
+    (sbrec_server_has_##table##_table(idl)              \
+     ? sbrec_##table##_set_condition(idl, cond) \
+     : 0)
 
 static unsigned int
 update_sb_monitors(struct ovsdb_idl *ovnsb_idl,
@@ -288,17 +330,17 @@ update_sb_monitors(struct ovsdb_idl *ovnsb_idl,
 
 out:;
     unsigned int cond_seqnos[] = {
-        sbrec_port_binding_set_condition(ovnsb_idl, &pb),
-        sbrec_logical_flow_set_condition(ovnsb_idl, &lf),
-        sbrec_logical_dp_group_set_condition(ovnsb_idl, &ldpg),
-        sbrec_mac_binding_set_condition(ovnsb_idl, &mb),
-        sbrec_multicast_group_set_condition(ovnsb_idl, &mg),
-        sbrec_dns_set_condition(ovnsb_idl, &dns),
-        sbrec_controller_event_set_condition(ovnsb_idl, &ce),
-        sbrec_ip_multicast_set_condition(ovnsb_idl, &ip_mcast),
-        sbrec_igmp_group_set_condition(ovnsb_idl, &igmp),
-        sbrec_chassis_private_set_condition(ovnsb_idl, &chprv),
-        sbrec_chassis_template_var_set_condition(ovnsb_idl, &tv),
+        sb_table_set_monitor_condition(ovnsb_idl, port_binding, &pb),
+        sb_table_set_monitor_condition(ovnsb_idl, logical_flow, &lf),
+        sb_table_set_monitor_condition(ovnsb_idl, logical_dp_group, &ldpg),
+        sb_table_set_monitor_condition(ovnsb_idl, mac_binding, &mb),
+        sb_table_set_monitor_condition(ovnsb_idl, multicast_group, &mg),
+        sb_table_set_monitor_condition(ovnsb_idl, dns, &dns),
+        sb_table_set_monitor_condition(ovnsb_idl, controller_event, &ce),
+        sb_table_set_monitor_condition(ovnsb_idl, ip_multicast, &ip_mcast),
+        sb_table_set_monitor_condition(ovnsb_idl, igmp_group, &igmp),
+        sb_table_set_monitor_condition(ovnsb_idl, chassis_private, &chprv),
+        sb_table_set_monitor_condition(ovnsb_idl, chassis_template_var, &tv),
     };
 
     unsigned int expected_cond_seqno = 0;
@@ -321,9 +363,13 @@ out:;
 }
 
 static const char *
-br_int_name(const struct ovsrec_open_vswitch *cfg)
+br_int_name(const struct ovsrec_open_vswitch_table *ovs_table)
 {
-    return smap_get_def(&cfg->external_ids, "ovn-bridge", DEFAULT_BRIDGE_NAME);
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_table_first(ovs_table);
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    return get_chassis_external_id_value(&cfg->external_ids, chassis_id,
+                                         "ovn-bridge", DEFAULT_BRIDGE_NAME);
 }
 
 static const struct ovsrec_bridge *
@@ -335,7 +381,7 @@ create_br_int(struct ovsdb_idl_txn *ovs_idl_txn,
     if (!cfg) {
         return NULL;
     }
-    const char *bridge_name = br_int_name(cfg);
+    const char *bridge_name = br_int_name(ovs_table);
 
     ovsdb_idl_txn_add_comment(ovs_idl_txn,
             "ovn-controller: creating integration bridge '%s'", bridge_name);
@@ -420,7 +466,7 @@ get_br_int(const struct ovsrec_bridge_table *bridge_table,
         return NULL;
     }
 
-    return get_bridge(bridge_table, br_int_name(cfg));
+    return get_bridge(bridge_table, br_int_name(ovs_table));
 }
 
 static const struct ovsrec_datapath *
@@ -459,8 +505,11 @@ process_br_int(struct ovsdb_idl_txn *ovs_idl_txn,
              * Otherwise use the datapath-type set in br-int, if any.
              * Finally, assume "system" datapath if none configured.
              */
+            const char *chassis_id = get_ovs_chassis_id(ovs_table);
             const char *datapath_type =
-                smap_get(&cfg->external_ids, "ovn-bridge-datapath-type");
+                get_chassis_external_id_value(
+                    &cfg->external_ids, chassis_id,
+                    "ovn-bridge-datapath-type", NULL);
 
             if (!datapath_type) {
                 if (br_int->datapath_type[0]) {
@@ -488,22 +537,6 @@ process_br_int(struct ovsdb_idl_txn *ovs_idl_txn,
     *br_int_ = br_int;
 }
 
-static const char *
-get_ovs_chassis_id(const struct ovsrec_open_vswitch_table *ovs_table)
-{
-    const struct ovsrec_open_vswitch *cfg
-        = ovsrec_open_vswitch_table_first(ovs_table);
-    const char *chassis_id = cfg ? smap_get(&cfg->external_ids, "system-id")
-                                 : NULL;
-
-    if (!chassis_id) {
-        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-        VLOG_WARN_RL(&rl, "'system-id' in Open_vSwitch database is missing.");
-    }
-
-    return chassis_id;
-}
-
 static void
 update_ssl_config(const struct ovsrec_ssl_table *ssl_table)
 {
@@ -527,10 +560,16 @@ static int
 get_ofctrl_probe_interval(struct ovsdb_idl *ovs_idl)
 {
     const struct ovsrec_open_vswitch *cfg = ovsrec_open_vswitch_first(ovs_idl);
-    return !cfg ? OFCTRL_DEFAULT_PROBE_INTERVAL_SEC :
-                  smap_get_int(&cfg->external_ids,
-                               "ovn-openflow-probe-interval",
-                               OFCTRL_DEFAULT_PROBE_INTERVAL_SEC);
+    if (!cfg) {
+        return OFCTRL_DEFAULT_PROBE_INTERVAL_SEC;
+    }
+
+    const struct ovsrec_open_vswitch_table *ovs_table =
+        ovsrec_open_vswitch_table_get(ovs_idl);
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    return get_chassis_external_id_value_int(
+        &cfg->external_ids, chassis_id,
+        "ovn-openflow-probe-interval", OFCTRL_DEFAULT_PROBE_INTERVAL_SEC);
 }
 
 /* Retrieves the pointer to the OVN Southbound database from 'ovs_idl' and
@@ -547,18 +586,26 @@ update_sb_db(struct ovsdb_idl *ovs_idl, struct ovsdb_idl *ovnsb_idl,
     }
 
     /* Set remote based on user configuration. */
-    const char *remote = smap_get(&cfg->external_ids, "ovn-remote");
+    const struct ovsrec_open_vswitch_table *ovs_table =
+        ovsrec_open_vswitch_table_get(ovs_idl);
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    const char *remote =
+        get_chassis_external_id_value(
+            &cfg->external_ids, chassis_id, "ovn-remote", NULL);
     ovsdb_idl_set_remote(ovnsb_idl, remote, true);
 
     /* Set probe interval, based on user configuration and the remote. */
     int default_interval = (remote && !stream_or_pstream_needs_probes(remote)
                             ? 0 : DEFAULT_PROBE_INTERVAL_MSEC);
-    int interval = smap_get_int(&cfg->external_ids,
-                                "ovn-remote-probe-interval", default_interval);
+    int interval =
+        get_chassis_external_id_value_int(
+            &cfg->external_ids, chassis_id,
+            "ovn-remote-probe-interval", default_interval);
     ovsdb_idl_set_probe_interval(ovnsb_idl, interval);
 
-    bool monitor_all = smap_get_bool(&cfg->external_ids, "ovn-monitor-all",
-                                     false);
+    bool monitor_all =
+        get_chassis_external_id_value_bool(
+            &cfg->external_ids, chassis_id, "ovn-monitor-all", false);
     if (monitor_all) {
         /* Always call update_sb_monitors when monitor_all is true.
          * Otherwise, don't call it here, because there would be unnecessary
@@ -581,25 +628,31 @@ update_sb_db(struct ovsdb_idl *ovs_idl, struct ovsdb_idl *ovnsb_idl,
     }
 
     if (ctx) {
-        lflow_cache_enable(ctx->lflow_cache,
-                           smap_get_bool(&cfg->external_ids,
-                                         "ovn-enable-lflow-cache",
-                                         true),
-                           smap_get_uint(&cfg->external_ids,
-                                         "ovn-limit-lflow-cache",
-                                         DEFAULT_LFLOW_CACHE_MAX_ENTRIES),
-                           smap_get_ullong(&cfg->external_ids,
-                                           "ovn-memlimit-lflow-cache-kb",
-                                           DEFAULT_LFLOW_CACHE_MAX_MEM_KB),
-                           smap_get_uint(&cfg->external_ids,
-                                         "ovn-trim-limit-lflow-cache",
-                                         DEFAULT_LFLOW_CACHE_TRIM_LIMIT),
-                           smap_get_uint(&cfg->external_ids,
-                                         "ovn-trim-wmark-perc-lflow-cache",
-                                         DEFAULT_LFLOW_CACHE_WMARK_PERC),
-                           smap_get_uint(&cfg->external_ids,
-                                         "ovn-trim-timeout-ms",
-                                         DEFAULT_LFLOW_CACHE_TRIM_TO_MS));
+        lflow_cache_enable(
+            ctx->lflow_cache,
+            get_chassis_external_id_value_bool(
+                &cfg->external_ids, chassis_id,
+                "ovn-enable-lflow-cache", true),
+            get_chassis_external_id_value_uint(
+                &cfg->external_ids, chassis_id,
+                "ovn-limit-lflow-cache",
+                DEFAULT_LFLOW_CACHE_MAX_ENTRIES),
+            get_chassis_external_id_value_ullong(
+                &cfg->external_ids, chassis_id,
+                "ovn-memlimit-lflow-cache-kb",
+                DEFAULT_LFLOW_CACHE_MAX_MEM_KB),
+            get_chassis_external_id_value_uint(
+                &cfg->external_ids, chassis_id,
+                "ovn-trim-limit-lflow-cache",
+                DEFAULT_LFLOW_CACHE_TRIM_LIMIT),
+            get_chassis_external_id_value_uint(
+                &cfg->external_ids, chassis_id,
+                "ovn-trim-wmark-perc-lflow-cache",
+                DEFAULT_LFLOW_CACHE_WMARK_PERC),
+            get_chassis_external_id_value_uint(
+                &cfg->external_ids, chassis_id,
+                "ovn-trim-timeout-ms",
+                DEFAULT_LFLOW_CACHE_TRIM_TO_MS));
     }
 }
 
@@ -746,6 +799,11 @@ update_ct_zones(const struct shash *binding_lports,
             }
             bitmap_set1(ct_zone_bitmap, snat_req_node->data);
             node->data = snat_req_node->data;
+        } else {
+            add_pending_ct_zone_entry(pending_ct_zones, CT_ZONE_OF_QUEUED,
+                                      snat_req_node->data, true, snat_req_node->name);
+            bitmap_set1(ct_zone_bitmap, snat_req_node->data);
+            simap_put(ct_zones, snat_req_node->name, snat_req_node->data);
         }
     }
 
@@ -842,7 +900,7 @@ restore_ct_zones(const struct ovsrec_bridge_table *bridge_table,
     }
 
     const struct ovsrec_bridge *br_int;
-    br_int = get_bridge(bridge_table, br_int_name(cfg));
+    br_int = get_bridge(bridge_table, br_int_name(ovs_table));
     if (!br_int) {
         /* If the integration bridge hasn't been defined, assume that
          * any existing ct-zone definitions aren't valid. */
@@ -955,7 +1013,9 @@ get_transport_zones(const struct ovsrec_open_vswitch_table *ovs_table)
 {
     const struct ovsrec_open_vswitch *cfg
         = ovsrec_open_vswitch_table_first(ovs_table);
-    return smap_get_def(&cfg->external_ids, "ovn-transport-zones", "");
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    return get_chassis_external_id_value(&cfg->external_ids, chassis_id,
+                                         "ovn-transport-zones", "");
 }
 
 static void
@@ -988,6 +1048,8 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     ovsdb_idl_add_column(ovs_idl, &ovsrec_ssl_col_private_key);
     ovsdb_idl_add_table(ovs_idl, &ovsrec_table_datapath);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_datapath_col_capabilities);
+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_flow_sample_collector_set);
+
     chassis_register_ovs_idl(ovs_idl);
     encaps_register_ovs_idl(ovs_idl);
     binding_register_ovs_idl(ovs_idl);
@@ -1004,6 +1066,11 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     ovsdb_idl_track_add_column(ovs_idl, &ovsrec_port_col_name);
     ovsdb_idl_track_add_column(ovs_idl, &ovsrec_port_col_interfaces);
     ovsdb_idl_track_add_column(ovs_idl, &ovsrec_port_col_external_ids);
+    ovsdb_idl_track_add_column(ovs_idl,
+                               &ovsrec_flow_sample_collector_set_col_bridge);
+    ovsdb_idl_track_add_column(ovs_idl,
+                               &ovsrec_flow_sample_collector_set_col_id);
+    mirror_register_ovs_idl(ovs_idl);
 }
 
 #define SB_NODES \
@@ -1051,7 +1118,8 @@ enum sb_engine_node {
     OVS_NODE(bridge, "bridge") \
     OVS_NODE(port, "port") \
     OVS_NODE(interface, "interface") \
-    OVS_NODE(qos, "qos")
+    OVS_NODE(qos, "qos") \
+    OVS_NODE(flow_sample_collector_set, "flow_sample_collector_set")
 
 enum ovs_engine_node {
 #define OVS_NODE(NAME, NAME_STR) OVS_##NAME,
@@ -2603,6 +2671,425 @@ load_balancers_by_dp_cleanup(struct hmap *lbs)
     free(lbs);
 }
 
+/* Engine node which is used to handle runtime related data to
+ * load balancers. */
+struct ed_type_lb_data {
+    /* Locally installed 'struct ovn_controller_lb' by UUID. */
+    struct hmap local_lbs;
+    /* 'struct ovn_lb_five_tuple' removed during last run. */
+    struct hmap removed_tuples;
+    /* Load balancer <-> resource cross reference */
+    struct objdep_mgr deps_mgr;
+    /* Objects processed in the current engine execution.
+     * Cleared by 'en_lb_data_clear_tracked_data' before each engine
+     * execution. */
+    struct uuidset objs_processed;
+
+    bool change_tracked;
+    /* Load balancers removed/updated during last run. */
+    struct hmap old_lbs;
+    /* uuids of load balancers removed during last run. */
+    struct uuidset deleted;
+    /* uuids of load balancers updated during last run. */
+    struct uuidset updated;
+    /* uuids of load balancers added during last run. */
+    struct uuidset new;
+};
+
+struct lb_data_ctx_in {
+    const struct sbrec_load_balancer_table *lb_table;
+    const struct hmap *local_datapaths;
+    const struct smap *template_vars;
+};
+
+static void
+lb_data_removed_five_tuples_add(struct ed_type_lb_data *lb_data,
+                                const struct ovn_controller_lb *lb)
+{
+    if (!ovs_feature_is_supported(OVS_CT_TUPLE_FLUSH_SUPPORT)) {
+        return;
+    }
+
+    for (size_t i = 0; i < lb->n_vips; i++) {
+        struct ovn_lb_vip *vip = &lb->vips[i];
+        for (size_t j = 0; j < vip->n_backends; j++) {
+            struct ovn_lb_backend *backend = &vip->backends[j];
+
+            ovn_lb_5tuple_add(&lb_data->removed_tuples, vip, backend,
+                              lb->proto);
+        }
+    }
+}
+
+static void
+lb_data_removed_five_tuples_remove(struct ed_type_lb_data *lb_data,
+                                   const struct ovn_controller_lb *lb)
+{
+    if (!ovs_feature_is_supported(OVS_CT_TUPLE_FLUSH_SUPPORT)) {
+        return;
+    }
+
+    for (size_t i = 0; i < lb->n_vips; i++) {
+        struct ovn_lb_vip *vip = &lb->vips[i];
+        for (size_t j = 0; j < vip->n_backends; j++) {
+            struct ovn_lb_backend *backend = &vip->backends[j];
+
+
+            struct ovn_lb_5tuple tuple;
+            ovn_lb_5tuple_init(&tuple, vip, backend, lb->proto);
+            ovn_lb_5tuple_find_and_delete(&lb_data->removed_tuples, &tuple);
+        }
+    }
+}
+
+static void
+lb_data_local_lb_add(struct ed_type_lb_data *lb_data,
+                     const struct sbrec_load_balancer *sbrec_lb,
+                     const struct smap *template_vars, bool tracked)
+{
+    struct sset template_vars_ref = SSET_INITIALIZER(&template_vars_ref);
+    const struct uuid *uuid = &sbrec_lb->header_.uuid;
+
+    struct ovn_controller_lb *lb =
+        ovn_controller_lb_create(sbrec_lb, template_vars, &template_vars_ref);
+    hmap_insert(&lb_data->local_lbs, &lb->hmap_node, uuid_hash(uuid));
+
+    const char *tv_name;
+    SSET_FOR_EACH (tv_name, &template_vars_ref) {
+        objdep_mgr_add(&lb_data->deps_mgr, OBJDEP_TYPE_TEMPLATE, tv_name,
+                       uuid);
+    }
+
+    sset_destroy(&template_vars_ref);
+
+    lb_data_removed_five_tuples_remove(lb_data, lb);
+
+    if (!tracked) {
+        return;
+    }
+
+    if (ovn_controller_lb_find(&lb_data->old_lbs, uuid)) {
+        uuidset_insert(&lb_data->updated, uuid);
+        uuidset_find_and_delete(&lb_data->deleted, uuid);
+    } else {
+        uuidset_insert(&lb_data->new, uuid);
+    }
+}
+
+static void
+lb_data_local_lb_remove(struct ed_type_lb_data *lb_data,
+                        struct ovn_controller_lb *lb, bool tracked)
+{
+    const struct uuid *uuid = &lb->slb->header_.uuid;
+
+    objdep_mgr_remove_obj(&lb_data->deps_mgr, uuid);
+    hmap_remove(&lb_data->local_lbs, &lb->hmap_node);
+
+    lb_data_removed_five_tuples_add(lb_data, lb);
+
+    if (tracked) {
+        hmap_insert(&lb_data->old_lbs, &lb->hmap_node, uuid_hash(uuid));
+        uuidset_insert(&lb_data->deleted, uuid);
+    } else {
+        ovn_controller_lb_destroy(lb);
+    }
+}
+
+static bool
+lb_data_handle_changed_ref(enum objdep_type type, const char *res_name,
+                           struct ovs_list *objs_todo, const void *in_arg,
+                           void *out_arg)
+{
+    const struct lb_data_ctx_in *ctx_in = in_arg;
+    struct ed_type_lb_data *lb_data = out_arg;
+
+    struct object_to_resources_list_node *resource_lb_uuid;
+    LIST_FOR_EACH_POP (resource_lb_uuid, list_node, objs_todo) {
+        struct uuid *uuid = &resource_lb_uuid->obj_uuid;
+
+        VLOG_DBG("Reprocess LB "UUID_FMT" for resource type: %s, name: %s",
+                 UUID_ARGS(uuid), objdep_type_name(type), res_name);
+
+        struct ovn_controller_lb *lb =
+            ovn_controller_lb_find(&lb_data->local_lbs, uuid);
+        if (!lb) {
+            free(resource_lb_uuid);
+            continue;
+        }
+
+        lb_data_local_lb_remove(lb_data, lb, true);
+
+        const struct sbrec_load_balancer *sbrec_lb =
+            sbrec_load_balancer_table_get_for_uuid(ctx_in->lb_table, uuid);
+        if (!lb_is_local(sbrec_lb, ctx_in->local_datapaths)) {
+            free(resource_lb_uuid);
+            continue;
+        }
+
+        lb_data_local_lb_add(lb_data, sbrec_lb, ctx_in->template_vars, true);
+
+        free(resource_lb_uuid);
+    }
+    return true;
+}
+
+static void *
+en_lb_data_init(struct engine_node *node OVS_UNUSED,
+                struct engine_arg *arg OVS_UNUSED)
+{
+    struct ed_type_lb_data *lb_data = xzalloc(sizeof *lb_data);
+
+    hmap_init(&lb_data->local_lbs);
+    hmap_init(&lb_data->removed_tuples);
+    objdep_mgr_init(&lb_data->deps_mgr);
+    uuidset_init(&lb_data->objs_processed);
+    lb_data->change_tracked = false;
+    hmap_init(&lb_data->old_lbs);
+    uuidset_init(&lb_data->deleted);
+    uuidset_init(&lb_data->updated);
+    uuidset_init(&lb_data->new);
+
+    return lb_data;
+}
+
+static void
+en_lb_data_run(struct engine_node *node, void *data)
+{
+    struct ed_type_lb_data *lb_data = data;
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+    struct ed_type_template_vars *tv_data =
+        engine_get_input_data("template_vars", node);
+    const struct sbrec_load_balancer_table *lb_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+
+    struct ovn_controller_lb *lb;
+    HMAP_FOR_EACH_SAFE (lb, hmap_node, &lb_data->local_lbs) {
+        lb_data_local_lb_remove(lb_data, lb, false);
+    }
+
+    const struct sbrec_load_balancer *sbrec_lb;
+    SBREC_LOAD_BALANCER_TABLE_FOR_EACH (sbrec_lb, lb_table) {
+        if (!lb_is_local(sbrec_lb, &rt_data->local_datapaths)) {
+            continue;
+        }
+
+        lb_data_local_lb_add(lb_data, sbrec_lb,
+                             &tv_data->local_templates, false);
+    }
+
+    engine_set_node_state(node, EN_UPDATED);
+}
+
+static bool
+lb_data_sb_load_balancer_handler(struct engine_node *node, void *data)
+{
+    struct ed_type_lb_data *lb_data = data;
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+    struct ed_type_template_vars *tv_data =
+        engine_get_input_data("template_vars", node);
+    const struct sbrec_load_balancer_table *lb_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+
+    const struct sbrec_load_balancer *sbrec_lb;
+    SBREC_LOAD_BALANCER_TABLE_FOR_EACH_TRACKED (sbrec_lb, lb_table) {
+        struct ovn_controller_lb *lb;
+
+        if (!sbrec_load_balancer_is_new(sbrec_lb)) {
+            lb = ovn_controller_lb_find(&lb_data->local_lbs,
+                                        &sbrec_lb->header_.uuid);
+            if (!lb) {
+                continue;
+            }
+
+            lb_data_local_lb_remove(lb_data, lb, true);
+        }
+
+        if (sbrec_load_balancer_is_deleted(sbrec_lb) ||
+            !lb_is_local(sbrec_lb, &rt_data->local_datapaths)) {
+            continue;
+        }
+
+        lb_data_local_lb_add(lb_data, sbrec_lb,
+                             &tv_data->local_templates, true);
+    }
+
+    lb_data->change_tracked = true;
+    if (!uuidset_is_empty(&lb_data->deleted) ||
+        !uuidset_is_empty(&lb_data->updated) ||
+        !uuidset_is_empty(&lb_data->new)) {
+        engine_set_node_state(node, EN_UPDATED);
+    }
+
+    return true;
+}
+
+static bool
+lb_data_template_var_handler(struct engine_node *node, void *data)
+{
+    struct ed_type_lb_data *lb_data = data;
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+    struct ed_type_template_vars *tv_data =
+        engine_get_input_data("template_vars", node);
+    const struct sbrec_load_balancer_table *lb_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+
+    if (!tv_data->change_tracked) {
+        return false;
+    }
+
+    const struct lb_data_ctx_in ctx_in = {
+        .lb_table = lb_table,
+        .local_datapaths = &rt_data->local_datapaths,
+        .template_vars = &tv_data->local_templates
+    };
+
+    const char *res_name;
+    bool changed;
+
+    SSET_FOR_EACH (res_name, &tv_data->deleted) {
+        if (!objdep_mgr_handle_change(&lb_data->deps_mgr,
+                                      OBJDEP_TYPE_TEMPLATE,
+                                      res_name, lb_data_handle_changed_ref,
+                                      &lb_data->objs_processed,
+                                      &ctx_in, lb_data, &changed)) {
+            return false;
+        }
+        if (changed) {
+            engine_set_node_state(node, EN_UPDATED);
+        }
+    }
+    SSET_FOR_EACH (res_name, &tv_data->updated) {
+        if (!objdep_mgr_handle_change(&lb_data->deps_mgr,
+                                      OBJDEP_TYPE_TEMPLATE,
+                                      res_name, lb_data_handle_changed_ref,
+                                      &lb_data->objs_processed,
+                                      &ctx_in, lb_data, &changed)) {
+            return false;
+        }
+        if (changed) {
+            engine_set_node_state(node, EN_UPDATED);
+        }
+    }
+    SSET_FOR_EACH (res_name, &tv_data->new) {
+        if (!objdep_mgr_handle_change(&lb_data->deps_mgr,
+                                      OBJDEP_TYPE_TEMPLATE,
+                                      res_name, lb_data_handle_changed_ref,
+                                      &lb_data->objs_processed,
+                                      &ctx_in, lb_data, &changed)) {
+            return false;
+        }
+        if (changed) {
+            engine_set_node_state(node, EN_UPDATED);
+        }
+    }
+
+    lb_data->change_tracked = true;
+
+    return true;
+}
+
+static bool
+lb_data_runtime_data_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    struct ed_type_lb_data *lb_data = data;
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+    struct ed_type_template_vars *tv_data =
+        engine_get_input_data("template_vars", node);
+    const struct sbrec_load_balancer_table *lb_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+
+    /* There are no tracked data. Fall back to full recompute of
+     * lb_ct_tuple. */
+    if (!rt_data->tracked) {
+        return false;
+    }
+
+    struct hmap *tracked_dp_bindings = &rt_data->tracked_dp_bindings;
+    if (hmap_is_empty(tracked_dp_bindings)) {
+        return true;
+    }
+
+    struct hmap *lbs = NULL;
+
+    struct tracked_datapath *tdp;
+    HMAP_FOR_EACH (tdp, node, tracked_dp_bindings) {
+        if (tdp->tracked_type != TRACKED_RESOURCE_NEW) {
+            continue;
+        }
+
+        if (!lbs) {
+            lbs = load_balancers_by_dp_init(&rt_data->local_datapaths,
+                                            lb_table);
+        }
+
+        struct load_balancers_by_dp *lbs_by_dp =
+            load_balancers_by_dp_find(lbs, tdp->dp);
+        if (!lbs_by_dp) {
+            continue;
+        }
+
+        for (size_t i = 0; i < lbs_by_dp->n_dp_lbs; i++) {
+            const struct sbrec_load_balancer *sbrec_lb = lbs_by_dp->dp_lbs[i];
+            struct ovn_controller_lb *lb =
+                ovn_controller_lb_find(&lb_data->local_lbs,
+                                       &sbrec_lb->header_.uuid);
+
+            if (!lb && lb_is_local(sbrec_lb, &rt_data->local_datapaths)) {
+                lb_data_local_lb_add(lb_data, sbrec_lb,
+                                     &tv_data->local_templates, true);
+            }
+        }
+    }
+
+    load_balancers_by_dp_cleanup(lbs);
+
+    lb_data->change_tracked = true;
+    if (!uuidset_is_empty(&lb_data->deleted) ||
+        !uuidset_is_empty(&lb_data->updated) ||
+        !uuidset_is_empty(&lb_data->new)) {
+        engine_set_node_state(node, EN_UPDATED);
+    }
+
+    return true;
+}
+
+static void
+en_lb_data_clear_tracked_data(void *data)
+{
+    struct ed_type_lb_data *lb_data = data;
+
+    struct ovn_controller_lb *lb;
+    HMAP_FOR_EACH_POP (lb, hmap_node, &lb_data->old_lbs) {
+        ovn_controller_lb_destroy(lb);
+    }
+
+    hmap_clear(&lb_data->old_lbs);
+    uuidset_clear(&lb_data->objs_processed);
+    uuidset_clear(&lb_data->deleted);
+    uuidset_clear(&lb_data->updated);
+    uuidset_clear(&lb_data->new);
+    lb_data->change_tracked = false;
+}
+
+static void
+en_lb_data_cleanup(void *data)
+{
+    struct ed_type_lb_data *lb_data = data;
+
+    ovn_controller_lbs_destroy(&lb_data->local_lbs);
+    ovn_lb_5tuples_destroy(&lb_data->removed_tuples);
+    objdep_mgr_destroy(&lb_data->deps_mgr);
+    uuidset_destroy(&lb_data->objs_processed);
+    ovn_controller_lbs_destroy(&lb_data->old_lbs);
+    uuidset_destroy(&lb_data->deleted);
+    uuidset_destroy(&lb_data->updated);
+    uuidset_destroy(&lb_data->new);
+}
+
 /* Engine node which is used to handle the Non VIF data like
  *   - OVS patch ports
  *   - Tunnel ports and the related chassis information.
@@ -2786,11 +3273,6 @@ struct lflow_output_persistent_data {
     struct lflow_cache *lflow_cache;
 };
 
-struct lflow_output_hairpin_data {
-    struct id_pool *pool;
-    struct simap   ids;
-};
-
 struct ed_type_lflow_output {
     /* Logical flow table */
     struct ovn_desired_flow_table flow_table;
@@ -2805,7 +3287,7 @@ struct ed_type_lflow_output {
     /* conjunciton ID usage information of lflows */
     struct conj_ids conj_ids;
 
-    /* objects (lflows and lbs) processed in the current engine execution.
+    /* objects (lflows) processed in the current engine execution.
      * Cleared by en_lflow_output_clear_tracked_data before each engine
      * execution. */
     struct uuidset objs_processed;
@@ -2814,14 +3296,14 @@ struct ed_type_lflow_output {
      * full recompute. */
     struct lflow_output_persistent_data pd;
 
-    /* Data for managing hairpin flow conjunctive flow ids. */
-    struct lflow_output_hairpin_data hd;
-
     /* Fixed neighbor discovery supported options. */
     struct hmap nd_ra_opts;
 
     /* Fixed controller_event supported options. */
     struct controller_event_options controller_event_opts;
+
+    /* Configured Flow Sample Collector Sets. */
+    struct flow_collector_ids collector_ids;
 };
 
 static void
@@ -2880,9 +3362,6 @@ init_lflow_ctx(struct engine_node *node,
     const struct sbrec_multicast_group_table *multicast_group_table =
         EN_OVSDB_GET(engine_get_input("SB_multicast_group", node));
 
-    const struct sbrec_load_balancer_table *lb_table =
-        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
-
     const struct sbrec_fdb_table *fdb_table =
         EN_OVSDB_GET(engine_get_input("SB_fdb", node));
 
@@ -2927,6 +3406,9 @@ init_lflow_ctx(struct engine_node *node,
     struct ed_type_template_vars *template_vars =
         engine_get_input_data("template_vars", node);
 
+    struct ed_type_lb_data *lb_data =
+        engine_get_input_data("lb_data", node);
+
     l_ctx_in->sbrec_multicast_group_by_name_datapath =
         sbrec_mc_group_by_name_dp;
     l_ctx_in->sbrec_logical_flow_by_logical_datapath =
@@ -2945,7 +3427,6 @@ init_lflow_ctx(struct engine_node *node,
     l_ctx_in->mc_group_table = multicast_group_table;
     l_ctx_in->fdb_table = fdb_table,
     l_ctx_in->chassis = chassis;
-    l_ctx_in->lb_table = lb_table;
     l_ctx_in->static_mac_binding_table = smb_table;
     l_ctx_in->local_datapaths = &rt_data->local_datapaths;
     l_ctx_in->addr_sets = addr_sets;
@@ -2960,17 +3441,16 @@ init_lflow_ctx(struct engine_node *node,
     l_ctx_in->dhcpv6_opts = &dhcp_opts->v6_opts;
     l_ctx_in->controller_event_opts = &fo->controller_event_opts;
     l_ctx_in->template_vars = &template_vars->local_templates;
+    l_ctx_in->collector_ids = &fo->collector_ids;
+    l_ctx_in->local_lbs = &lb_data->local_lbs;
 
     l_ctx_out->flow_table = &fo->flow_table;
     l_ctx_out->group_table = &fo->group_table;
     l_ctx_out->meter_table = &fo->meter_table;
     l_ctx_out->lflow_deps_mgr = &fo->lflow_deps_mgr;
-    l_ctx_out->lb_deps_mgr = &fo->lb_deps_mgr;
     l_ctx_out->conj_ids = &fo->conj_ids;
     l_ctx_out->objs_processed = &fo->objs_processed;
     l_ctx_out->lflow_cache = fo->pd.lflow_cache;
-    l_ctx_out->hairpin_id_pool = fo->hd.pool;
-    l_ctx_out->hairpin_lb_ids = &fo->hd.ids;
 }
 
 static void *
@@ -2982,13 +3462,11 @@ en_lflow_output_init(struct engine_node *node OVS_UNUSED,
     ovn_extend_table_init(&data->group_table);
     ovn_extend_table_init(&data->meter_table);
     objdep_mgr_init(&data->lflow_deps_mgr);
-    objdep_mgr_init(&data->lb_deps_mgr);
     lflow_conj_ids_init(&data->conj_ids);
     uuidset_init(&data->objs_processed);
-    simap_init(&data->hd.ids);
-    data->hd.pool = id_pool_create(1, UINT32_MAX - 1);
     nd_ra_opts_init(&data->nd_ra_opts);
     controller_event_opts_init(&data->controller_event_opts);
+    flow_collector_ids_init(&data->collector_ids);
     return data;
 }
 
@@ -3007,14 +3485,12 @@ en_lflow_output_cleanup(void *data)
     ovn_extend_table_destroy(&flow_output_data->group_table);
     ovn_extend_table_destroy(&flow_output_data->meter_table);
     objdep_mgr_destroy(&flow_output_data->lflow_deps_mgr);
-    objdep_mgr_destroy(&flow_output_data->lb_deps_mgr);
     lflow_conj_ids_destroy(&flow_output_data->conj_ids);
     uuidset_destroy(&flow_output_data->objs_processed);
     lflow_cache_destroy(flow_output_data->pd.lflow_cache);
-    simap_destroy(&flow_output_data->hd.ids);
-    id_pool_destroy(flow_output_data->hd.pool);
     nd_ra_opts_destroy(&flow_output_data->nd_ra_opts);
     controller_event_opts_destroy(&flow_output_data->controller_event_opts);
+    flow_collector_ids_destroy(&flow_output_data->collector_ids);
 }
 
 static void
@@ -3044,7 +3520,6 @@ en_lflow_output_run(struct engine_node *node, void *data)
     struct ovn_extend_table *group_table = &fo->group_table;
     struct ovn_extend_table *meter_table = &fo->meter_table;
     struct objdep_mgr *lflow_deps_mgr = &fo->lflow_deps_mgr;
-    struct objdep_mgr *lb_deps_mgr = &fo->lb_deps_mgr;
 
     static bool first_run = true;
     if (first_run) {
@@ -3054,7 +3529,6 @@ en_lflow_output_run(struct engine_node *node, void *data)
         ovn_extend_table_clear(group_table, false /* desired */);
         ovn_extend_table_clear(meter_table, false /* desired */);
         objdep_mgr_clear(lflow_deps_mgr);
-        objdep_mgr_clear(lb_deps_mgr);
         lflow_conj_ids_clear(&fo->conj_ids);
     }
 
@@ -3082,6 +3556,103 @@ lflow_output_sb_logical_flow_handler(struct engine_node *node, void *data)
 
     engine_set_node_state(node, EN_UPDATED);
     return handled;
+}
+
+static bool
+lflow_output_flow_sample_collector_set_handler(struct engine_node *node,
+                                               void *data OVS_UNUSED)
+{
+    const struct ovsrec_flow_sample_collector_set_table *flow_collector_table =
+        EN_OVSDB_GET(engine_get_input("OVS_flow_sample_collector_set", node));
+    const struct ovsrec_open_vswitch_table *ovs_table =
+        EN_OVSDB_GET(engine_get_input("OVS_open_vswitch", node));
+    const struct ovsrec_bridge_table *bridge_table =
+        EN_OVSDB_GET(engine_get_input("OVS_bridge", node));
+
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_table_first(ovs_table);
+    if (!cfg) {
+        return true;
+    }
+
+    const struct ovsrec_bridge *br_int;
+    br_int = get_bridge(bridge_table, br_int_name(ovs_table));
+    if (!br_int) {
+        return true;
+    }
+
+    const struct ovsrec_flow_sample_collector_set *set;
+    OVSREC_FLOW_SAMPLE_COLLECTOR_SET_TABLE_FOR_EACH_TRACKED (set,
+                                                        flow_collector_table) {
+        if (set->bridge == br_int) {
+            struct ed_type_lflow_output *lfo = data;
+            flow_collector_ids_clear(&lfo->collector_ids);
+            flow_collector_ids_init_from_table(&lfo->collector_ids,
+                                               flow_collector_table);
+            return false;
+        }
+    }
+
+    engine_set_node_state(node, EN_UPDATED);
+    return true;
+}
+
+static void
+pflow_output_get_debug(struct engine_node *node, struct physical_debug *debug)
+{
+    const struct ovsrec_open_vswitch_table *ovs_table =
+        EN_OVSDB_GET(engine_get_input("OVS_open_vswitch", node));
+    const struct ovsrec_bridge_table *bridge_table =
+        EN_OVSDB_GET(engine_get_input("OVS_bridge", node));
+    const struct sbrec_sb_global_table *sb_global_table =
+        EN_OVSDB_GET(engine_get_input("SB_sb_global", node));
+    const struct sbrec_sb_global *sb_global =
+        sbrec_sb_global_table_first(sb_global_table);
+
+    if (!debug) {
+        return;
+    }
+    debug->collector_set_id = 0;
+    debug->obs_domain_id = 0;
+
+    const struct ovsrec_open_vswitch *ovs_cfg =
+        ovsrec_open_vswitch_table_first(ovs_table);
+    if (!ovs_cfg) {
+        return;
+    }
+
+    const struct ovsrec_bridge *br_int;
+    br_int = get_bridge(bridge_table, br_int_name(ovs_table));
+    if (!br_int) {
+        return;
+    }
+
+    const uint32_t debug_collector_set =
+        smap_get_uint(&sb_global->options, "debug_drop_collector_set", 0);
+    if (!debug_collector_set) {
+        return;
+    }
+
+    struct ovsdb_idl_index *ovsrec_flow_sample_collector_set_by_id =
+        engine_ovsdb_node_get_index(
+                engine_get_input("OVS_flow_sample_collector_set", node), "id");
+
+    struct ovsrec_flow_sample_collector_set *s =
+        ovsrec_flow_sample_collector_set_index_init_row(
+        ovsrec_flow_sample_collector_set_by_id);
+
+    ovsrec_flow_sample_collector_set_index_set_id(s, debug_collector_set);
+    ovsrec_flow_sample_collector_set_index_set_bridge(s, br_int);
+    if (!ovsrec_flow_sample_collector_set_index_find(
+        ovsrec_flow_sample_collector_set_by_id, s)) {
+        ovsrec_flow_sample_collector_set_index_destroy_row(s);
+        return;
+    }
+    ovsrec_flow_sample_collector_set_index_destroy_row(s);
+
+    debug->collector_set_id = debug_collector_set;
+    debug->obs_domain_id = smap_get_uint(&sb_global->options,
+                                         "debug_drop_domain_id", 0);
 }
 
 static bool
@@ -3320,16 +3891,6 @@ lflow_output_template_vars_handler(struct engine_node *node, void *data)
         if (changed) {
             engine_set_node_state(node, EN_UPDATED);
         }
-        if (!objdep_mgr_handle_change(l_ctx_out.lb_deps_mgr,
-                                      OBJDEP_TYPE_TEMPLATE,
-                                      res_name, lb_handle_changed_ref,
-                                      l_ctx_out.objs_processed,
-                                      &l_ctx_in, &l_ctx_out, &changed)) {
-            return false;
-        }
-        if (changed) {
-            engine_set_node_state(node, EN_UPDATED);
-        }
     }
     SSET_FOR_EACH (res_name, &tv_data->updated) {
         if (!objdep_mgr_handle_change(l_ctx_out.lflow_deps_mgr,
@@ -3342,31 +3903,11 @@ lflow_output_template_vars_handler(struct engine_node *node, void *data)
         if (changed) {
             engine_set_node_state(node, EN_UPDATED);
         }
-        if (!objdep_mgr_handle_change(l_ctx_out.lb_deps_mgr,
-                                      OBJDEP_TYPE_TEMPLATE,
-                                      res_name, lb_handle_changed_ref,
-                                      l_ctx_out.objs_processed,
-                                      &l_ctx_in, &l_ctx_out, &changed)) {
-            return false;
-        }
-        if (changed) {
-            engine_set_node_state(node, EN_UPDATED);
-        }
     }
     SSET_FOR_EACH (res_name, &tv_data->new) {
         if (!objdep_mgr_handle_change(l_ctx_out.lflow_deps_mgr,
                                       OBJDEP_TYPE_TEMPLATE,
                                       res_name, lflow_handle_changed_ref,
-                                      l_ctx_out.objs_processed,
-                                      &l_ctx_in, &l_ctx_out, &changed)) {
-            return false;
-        }
-        if (changed) {
-            engine_set_node_state(node, EN_UPDATED);
-        }
-        if (!objdep_mgr_handle_change(l_ctx_out.lb_deps_mgr,
-                                      OBJDEP_TYPE_TEMPLATE,
-                                      res_name, lb_handle_changed_ref,
                                       l_ctx_out.objs_processed,
                                       &l_ctx_in, &l_ctx_out, &changed)) {
             return false;
@@ -3403,23 +3944,13 @@ lflow_output_runtime_data_handler(struct engine_node *node,
     struct lflow_ctx_in l_ctx_in;
     struct lflow_ctx_out l_ctx_out;
     struct ed_type_lflow_output *fo = data;
-    struct hmap *lbs = NULL;
     init_lflow_ctx(node, fo, &l_ctx_in, &l_ctx_out);
 
     struct tracked_datapath *tdp;
     HMAP_FOR_EACH (tdp, node, tracked_dp_bindings) {
         if (tdp->tracked_type == TRACKED_RESOURCE_NEW) {
-            if (!lbs) {
-                lbs = load_balancers_by_dp_init(&rt_data->local_datapaths,
-                                                l_ctx_in.lb_table);
-            }
-
-            struct load_balancers_by_dp *lbs_by_dp =
-                load_balancers_by_dp_find(lbs, tdp->dp);
-            if (!lflow_add_flows_for_datapath(
-                    tdp->dp, lbs_by_dp ? lbs_by_dp->dp_lbs : NULL,
-                    lbs_by_dp ? lbs_by_dp->n_dp_lbs : 0,
-                    &l_ctx_in, &l_ctx_out)) {
+            if (!lflow_add_flows_for_datapath(tdp->dp, &l_ctx_in,
+                                              &l_ctx_out)) {
                 return false;
             }
         }
@@ -3433,20 +3964,29 @@ lflow_output_runtime_data_handler(struct engine_node *node,
         }
     }
 
-    load_balancers_by_dp_cleanup(lbs);
     engine_set_node_state(node, EN_UPDATED);
     return true;
 }
 
 static bool
-lflow_output_sb_load_balancer_handler(struct engine_node *node, void *data)
+lflow_output_lb_data_handler(struct engine_node *node, void *data)
 {
     struct ed_type_lflow_output *fo = data;
+    struct ed_type_lb_data *lb_data = engine_get_input_data("lb_data", node);
+
+    if (!lb_data->change_tracked) {
+        return false;
+    }
+
     struct lflow_ctx_in l_ctx_in;
     struct lflow_ctx_out l_ctx_out;
     init_lflow_ctx(node, fo, &l_ctx_in, &l_ctx_out);
 
-    bool handled = lflow_handle_changed_lbs(&l_ctx_in, &l_ctx_out);
+    bool handled = lflow_handle_changed_lbs(&l_ctx_in, &l_ctx_out,
+                                            &lb_data->deleted,
+                                            &lb_data->updated,
+                                            &lb_data->new,
+                                            &lb_data->old_lbs);
 
     engine_set_node_state(node, EN_UPDATED);
     return handled;
@@ -3534,11 +4074,6 @@ static void init_physical_ctx(struct engine_node *node,
         chassis = chassis_lookup_by_name(sbrec_chassis_by_name, chassis_id);
     }
 
-    const struct sbrec_sb_global_table *sb_global_table =
-        EN_OVSDB_GET(engine_get_input("SB_sb_global", node));
-    const struct sbrec_sb_global *sb_global =
-        sbrec_sb_global_table_first(sb_global_table);
-
     ovs_assert(br_int && chassis);
 
     struct ed_type_ct_zones *ct_zones_data =
@@ -3560,13 +4095,8 @@ static void init_physical_ctx(struct engine_node *node,
     p_ctx->local_bindings = &rt_data->lbinding_data.bindings;
     p_ctx->patch_ofports = &non_vif_data->patch_ofports;
     p_ctx->chassis_tunnels = &non_vif_data->chassis_tunnels;
-    p_ctx->debug.collector_set_id = smap_get_uint(&sb_global->options,
-                                                  "debug_drop_collector_set",
-                                                  0);
 
-    p_ctx->debug.obs_domain_id = smap_get_uint(&sb_global->options,
-                                               "debug_drop_domain_id",
-                                               0);
+    pflow_output_get_debug(node, &p_ctx->debug);
 }
 
 static void *
@@ -3770,61 +4300,53 @@ pflow_output_activated_ports_handler(struct engine_node *node, void *data)
 }
 
 static bool
-pflow_output_sb_sb_global_handler(struct engine_node *node, void *data)
+pflow_output_debug_handler(struct engine_node *node, void *data)
 {
-    const struct sbrec_sb_global_table *sb_global_table =
-        EN_OVSDB_GET(engine_get_input("SB_sb_global", node));
-    const struct sbrec_sb_global *sb_global =
-        sbrec_sb_global_table_first(sb_global_table);
-
     struct ed_type_pflow_output *pfo = data;
+    struct physical_debug debug;
 
-    uint32_t collector_set_id = smap_get_uint(&sb_global->options,
-                                              "debug_drop_collector_set",
-                                              0);
-    uint32_t obs_domain_id = smap_get_uint(&sb_global->options,
-                                           "debug_drop_domain_id",
-                                           0);
+    pflow_output_get_debug(node, &debug);
 
-    if (pfo->debug.collector_set_id != collector_set_id ||
-        pfo->debug.obs_domain_id != obs_domain_id) {
-        engine_set_node_state(node, EN_UPDATED);
-        pfo->debug.collector_set_id = collector_set_id;
-        pfo->debug.obs_domain_id = obs_domain_id;
+    if (pfo->debug.collector_set_id != debug.collector_set_id ||
+        pfo->debug.obs_domain_id != debug.obs_domain_id) {
+        pfo->debug = debug;
+        return false;
     }
+    engine_set_node_state(node, EN_UPDATED);
     return true;
 }
 
 static void *
-en_flow_output_init(struct engine_node *node OVS_UNUSED,
-                    struct engine_arg *arg OVS_UNUSED)
+en_controller_output_init(struct engine_node *node OVS_UNUSED,
+                          struct engine_arg *arg OVS_UNUSED)
 {
     return NULL;
 }
 
 static void
-en_flow_output_cleanup(void *data OVS_UNUSED)
+en_controller_output_cleanup(void *data OVS_UNUSED)
 {
 
 }
 
 static void
-en_flow_output_run(struct engine_node *node OVS_UNUSED, void *data OVS_UNUSED)
+en_controller_output_run(struct engine_node *node OVS_UNUSED,
+                         void *data OVS_UNUSED)
 {
     engine_set_node_state(node, EN_UPDATED);
 }
 
 static bool
-flow_output_pflow_output_handler(struct engine_node *node,
-                                 void *data OVS_UNUSED)
+controller_output_pflow_output_handler(struct engine_node *node,
+                                       void *data OVS_UNUSED)
 {
     engine_set_node_state(node, EN_UPDATED);
     return true;
 }
 
 static bool
-flow_output_lflow_output_handler(struct engine_node *node,
-                                 void *data OVS_UNUSED)
+controller_output_lflow_output_handler(struct engine_node *node,
+                                       void *data OVS_UNUSED)
 {
     engine_set_node_state(node, EN_UPDATED);
     return true;
@@ -3868,8 +4390,12 @@ check_northd_version(struct ovsdb_idl *ovs_idl, struct ovsdb_idl *ovnsb_idl,
     static bool version_mismatch;
 
     const struct ovsrec_open_vswitch *cfg = ovsrec_open_vswitch_first(ovs_idl);
-    if (!cfg || !smap_get_bool(&cfg->external_ids, "ovn-match-northd-version",
-                               false)) {
+    const struct ovsrec_open_vswitch_table *ovs_table =
+        ovsrec_open_vswitch_table_get(ovs_idl);
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    if (!cfg || !get_chassis_external_id_value_bool(
+                     &cfg->external_ids, chassis_id,
+                     "ovn-match-northd-version", false)) {
         version_mismatch = false;
         return true;
     }
@@ -3910,6 +4436,9 @@ main(int argc, char *argv[])
     struct ovn_controller_exit_args exit_args = {&exiting, &restart};
     int retval;
 
+    /* Read from system-id-override file once on startup. */
+    file_system_id = get_file_system_id();
+
     ovs_cmdl_proctitle_init(argc, argv);
     ovn_set_program_name(argv[0]);
     service_start(&argc, &argv);
@@ -3935,6 +4464,7 @@ main(int argc, char *argv[])
     patch_init();
     pinctrl_init();
     lflow_init();
+    mirror_init();
     vif_plug_provider_initialize();
 
     /* Connect to OVS OVSDB instance. */
@@ -3945,6 +4475,13 @@ main(int argc, char *argv[])
     struct ovsdb_idl_index *ovsrec_port_by_interfaces
         = ovsdb_idl_index_create1(ovs_idl_loop.idl,
                                   &ovsrec_port_col_interfaces);
+    struct ovsdb_idl_index *ovsrec_port_by_name
+        = ovsdb_idl_index_create1(ovs_idl_loop.idl,
+                                  &ovsrec_port_col_name);
+    struct ovsdb_idl_index *ovsrec_flow_sample_collector_set_by_id
+        = ovsdb_idl_index_create2(ovs_idl_loop.idl,
+                                  &ovsrec_flow_sample_collector_set_col_bridge,
+                                  &ovsrec_flow_sample_collector_set_col_id);
 
     ovsdb_idl_get_initial_snapshot(ovs_idl_loop.idl);
 
@@ -4081,11 +4618,12 @@ main(int argc, char *argv[])
     ENGINE_NODE(postponed_ports, "postponed_ports");
     ENGINE_NODE(pflow_output, "physical_flow_output");
     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lflow_output, "logical_flow_output");
-    ENGINE_NODE(flow_output, "flow_output");
+    ENGINE_NODE(controller_output, "controller_output");
     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(addr_sets, "addr_sets");
     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(port_groups, "port_groups");
     ENGINE_NODE(northd_options, "northd_options");
     ENGINE_NODE(dhcp_options, "dhcp_options");
+    ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lb_data, "lb_data");
 
 #define SB_NODE(NAME, NAME_STR) ENGINE_NODE_SB(NAME, NAME_STR);
     SB_NODES
@@ -4100,6 +4638,13 @@ main(int argc, char *argv[])
     engine_add_input(&en_template_vars, &en_sb_chassis, NULL);
     engine_add_input(&en_template_vars, &en_sb_chassis_template_var,
                      template_vars_sb_chassis_template_var_handler);
+
+    engine_add_input(&en_lb_data, &en_sb_load_balancer,
+                     lb_data_sb_load_balancer_handler);
+    engine_add_input(&en_lb_data, &en_template_vars,
+                     lb_data_template_var_handler);
+    engine_add_input(&en_lb_data, &en_runtime_data,
+                     lb_data_runtime_data_handler);
 
     engine_add_input(&en_addr_sets, &en_sb_address_set,
                      addr_sets_sb_address_set_handler);
@@ -4145,8 +4690,10 @@ main(int argc, char *argv[])
     engine_add_input(&en_pflow_output, &en_mff_ovn_geneve, NULL);
     engine_add_input(&en_pflow_output, &en_ovs_open_vswitch, NULL);
     engine_add_input(&en_pflow_output, &en_ovs_bridge, NULL);
+    engine_add_input(&en_pflow_output, &en_ovs_flow_sample_collector_set,
+                     pflow_output_debug_handler);
     engine_add_input(&en_pflow_output, &en_sb_sb_global,
-                     pflow_output_sb_sb_global_handler);
+                     pflow_output_debug_handler);
 
     engine_add_input(&en_northd_options, &en_sb_sb_global,
                      en_northd_options_sb_sb_global_handler);
@@ -4187,6 +4734,8 @@ main(int argc, char *argv[])
 
     engine_add_input(&en_lflow_output, &en_ovs_open_vswitch, NULL);
     engine_add_input(&en_lflow_output, &en_ovs_bridge, NULL);
+    engine_add_input(&en_lflow_output, &en_ovs_flow_sample_collector_set,
+                     lflow_output_flow_sample_collector_set_handler);
 
     engine_add_input(&en_lflow_output, &en_sb_mac_binding,
                      lflow_output_sb_mac_binding_handler);
@@ -4201,8 +4750,8 @@ main(int argc, char *argv[])
     engine_add_input(&en_lflow_output, &en_sb_logical_dp_group,
                      engine_noop_handler);
     engine_add_input(&en_lflow_output, &en_sb_dns, NULL);
-    engine_add_input(&en_lflow_output, &en_sb_load_balancer,
-                     lflow_output_sb_load_balancer_handler);
+    engine_add_input(&en_lflow_output, &en_lb_data,
+                     lflow_output_lb_data_handler);
     engine_add_input(&en_lflow_output, &en_sb_fdb,
                      lflow_output_sb_fdb_handler);
     engine_add_input(&en_lflow_output, &en_sb_meter,
@@ -4247,16 +4796,16 @@ main(int argc, char *argv[])
     engine_add_input(&en_runtime_data, &en_ovs_interface_shadow,
                      runtime_data_ovs_interface_shadow_handler);
 
-    engine_add_input(&en_flow_output, &en_lflow_output,
-                     flow_output_lflow_output_handler);
-    engine_add_input(&en_flow_output, &en_pflow_output,
-                     flow_output_pflow_output_handler);
+    engine_add_input(&en_controller_output, &en_lflow_output,
+                     controller_output_lflow_output_handler);
+    engine_add_input(&en_controller_output, &en_pflow_output,
+                     controller_output_pflow_output_handler);
 
     struct engine_arg engine_arg = {
         .sb_idl = ovnsb_idl_loop.idl,
         .ovs_idl = ovs_idl_loop.idl,
     };
-    engine_init(&en_flow_output, &engine_arg);
+    engine_init(&en_controller_output, &engine_arg);
 
     engine_ovsdb_node_add_index(&en_sb_chassis, "name", sbrec_chassis_by_name);
     engine_ovsdb_node_add_index(&en_sb_multicast_group, "name_datapath",
@@ -4281,6 +4830,8 @@ main(int argc, char *argv[])
                                 sbrec_static_mac_binding_by_datapath);
     engine_ovsdb_node_add_index(&en_sb_chassis_template_var, "chassis",
                                 sbrec_chassis_template_var_index_by_chassis);
+    engine_ovsdb_node_add_index(&en_ovs_flow_sample_collector_set, "id",
+                                ovsrec_flow_sample_collector_set_by_id);
 
     struct ed_type_lflow_output *lflow_output_data =
         engine_get_internal_data(&en_lflow_output);
@@ -4292,6 +4843,8 @@ main(int argc, char *argv[])
         engine_get_internal_data(&en_runtime_data);
     struct ed_type_template_vars *template_vars_data =
         engine_get_internal_data(&en_template_vars);
+    struct ed_type_lb_data *lb_data =
+        engine_get_internal_data(&en_lb_data);
 
     ofctrl_init(&lflow_output_data->group_table,
                 &lflow_output_data->meter_table,
@@ -4472,6 +5025,12 @@ main(int argc, char *argv[])
             }
         }
 
+        static bool chassis_idx_stored = false;
+        if (ovs_idl_txn && !chassis_idx_stored) {
+            store_chassis_index_if_needed(ovs_table);
+            chassis_idx_stored = true;
+        }
+
         if (ovsdb_idl_has_ever_connected(ovnsb_idl_loop.idl) &&
             northd_version_match) {
 
@@ -4519,8 +5078,7 @@ main(int argc, char *argv[])
                 }
 
                 if (chassis) {
-                    encaps_run(ovs_idl_txn,
-                               bridge_table, br_int,
+                    encaps_run(ovs_idl_txn, br_int,
                                sbrec_chassis_table_get(ovnsb_idl_loop.idl),
                                chassis,
                                sbrec_sb_global_first(ovnsb_idl_loop.idl),
@@ -4588,7 +5146,7 @@ main(int argc, char *argv[])
                             sbrec_port_binding_by_type,
                             ovsrec_bridge_table_get(ovs_idl_loop.idl),
                             ovsrec_open_vswitch_table_get(ovs_idl_loop.idl),
-                            ovsrec_port_table_get(ovs_idl_loop.idl),
+                            ovsrec_port_by_name,
                             br_int, chassis, &runtime_data->local_datapaths);
                         stopwatch_stop(PATCH_RUN_STOPWATCH_NAME, time_msec());
                         if (vif_plug_provider_has_providers() && ovs_idl_txn) {
@@ -4639,6 +5197,8 @@ main(int argc, char *argv[])
                                         ovnsb_idl_loop.idl),
                                     sbrec_service_monitor_table_get(
                                         ovnsb_idl_loop.idl),
+                                    sbrec_mac_binding_table_get(
+                                        ovnsb_idl_loop.idl),
                                     sbrec_bfd_table_get(ovnsb_idl_loop.idl),
                                     br_int, chassis,
                                     &runtime_data->local_datapaths,
@@ -4647,6 +5207,11 @@ main(int argc, char *argv[])
                                     &runtime_data->local_active_ports_ras);
                         stopwatch_stop(PINCTRL_RUN_STOPWATCH_NAME,
                                        time_msec());
+                        mirror_run(ovs_idl_txn,
+                                   ovsrec_mirror_table_get(ovs_idl_loop.idl),
+                                   sbrec_mirror_table_get(ovnsb_idl_loop.idl),
+                                   br_int,
+                                   &runtime_data->lbinding_data.bindings);
                         /* Updating monitor conditions if runtime data or
                          * logical datapath goups changed. */
                         if (engine_node_changed(&en_runtime_data)
@@ -4678,13 +5243,15 @@ main(int argc, char *argv[])
 
                     lflow_output_data = engine_get_data(&en_lflow_output);
                     pflow_output_data = engine_get_data(&en_pflow_output);
+                    lb_data = engine_get_data(&en_lb_data);
                     if (lflow_output_data && pflow_output_data &&
-                        ct_zones_data) {
+                        ct_zones_data && lb_data) {
                         stopwatch_start(OFCTRL_PUT_STOPWATCH_NAME,
                                         time_msec());
                         ofctrl_put(&lflow_output_data->flow_table,
                                    &pflow_output_data->flow_table,
                                    &ct_zones_data->pending,
+                                   &lb_data->removed_tuples,
                                    sbrec_meter_table_get(ovnsb_idl_loop.idl),
                                    ofctrl_seqno_get_req_cfg(),
                                    engine_node_changed(&en_lflow_output),
@@ -4872,7 +5439,7 @@ loop_done:
             /* Run all of the cleanup functions, even if one of them returns
              * false. We're done if all of them return true. */
             done = binding_cleanup(ovnsb_idl_txn, port_binding_table, chassis);
-            done = chassis_cleanup(ovnsb_idl_txn,
+            done = chassis_cleanup(ovs_idl_txn, ovnsb_idl_txn, ovs_table,
                                    chassis, chassis_private) && done;
             done = encaps_cleanup(ovs_idl_txn, br_int) && done;
             done = igmp_group_cleanup(ovnsb_idl_txn, sbrec_igmp_group) && done;
@@ -4893,6 +5460,7 @@ loop_done:
     pinctrl_destroy();
     binding_destroy();
     patch_destroy();
+    mirror_destroy();
     if_status_mgr_destroy(if_mgr);
     shash_destroy(&vif_plug_deleted_iface_ids);
     shash_destroy(&vif_plug_changed_iface_ids);
@@ -4903,6 +5471,12 @@ loop_done:
 
     ovs_feature_support_destroy();
     free(ovs_remote);
+    if (file_system_id) {
+        free(file_system_id);
+    }
+    if (cli_system_id) {
+        free(cli_system_id);
+    }
     service_stop();
 
     exit(retval);
@@ -4928,6 +5502,7 @@ parse_options(int argc, char *argv[])
         STREAM_SSL_LONG_OPTIONS,
         {"peer-ca-cert", required_argument, NULL, OPT_PEER_CA_CERT},
         {"bootstrap-ca-cert", required_argument, NULL, OPT_BOOTSTRAP_CA_CERT},
+        {"chassis", required_argument, NULL, 'n'},
         {"enable-dummy-vif-plug", no_argument, NULL,
          OPT_ENABLE_DUMMY_VIF_PLUG},
         {NULL, 0, NULL, 0}
@@ -4979,6 +5554,10 @@ parse_options(int argc, char *argv[])
             vif_plug_dummy_enable();
             break;
 
+        case 'n':
+            cli_system_id = xstrdup(optarg);
+            break;
+
         case '?':
             exit(EXIT_FAILURE);
 
@@ -5014,6 +5593,7 @@ usage(void)
     daemon_usage();
     vlog_usage();
     printf("\nOther options:\n"
+           "  -n                      custom chassis name\n"
            "  -h, --help              display this help message\n"
            "  -V, --version           display version information\n");
     exit(EXIT_SUCCESS);

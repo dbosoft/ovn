@@ -73,7 +73,12 @@
       not directly supported.  Users have two options: either first
       gracefully stop <code>ovn-controller</code> or manually delete the
       stale <code>Chassis</code> and <code>Chassis_Private</code> records
-      after changing the <code>system-id</code>.</dd>
+      after changing the <code>system-id</code>. Note that the chassis name can
+      also be provided via the <code>system-id-override</code> file in the
+      local OVN "etc" directory or via the <code>-n</code> command-line option.
+      The following precedence is used: first, the command-line option is read;
+      if not present, the <code>system-id-override</code> file is read; if not
+      present, then the name configured in the database is used.</dd>
 
       <dt><code>external_ids:hostname</code></dt>
       <dd>The hostname to use in the Chassis table.</dd>
@@ -84,6 +89,10 @@
         default is <code>br-int</code>.  If this bridge does not exist when
         ovn-controller starts, it will be created automatically with the
         default configuration suggested in <code>ovn-architecture</code>(7).
+        When more than one controllers are running on the same host,
+        <code>external_ids:ovn-bridge-CHASSIS_NAME</code> should be set for
+        each of them, pointing to a unique bridge. This is required to avoid
+        controllers stepping on each others' feet.
       </dd>
 
       <dt><code>external_ids:ovn-bridge-datapath-type</code></dt>
@@ -353,6 +362,31 @@
         are used on the host for overlay traffic.
       </dd>
     </dl>
+
+    <p>
+        Most of configuration options listed above can also be set for a
+        particular chassis name (see <code>external_ids:system-id </code>
+        for more information). This can be achieved by setting
+        <code>external_ids:option-[chassis]</code> instead of
+        <code>external_ids:option</code>. For example, set
+        <code>external_ids:ovn-encap-ip-otherhv</code> to use a particular
+        IP address for the controller instance named <code>otherhv</code>.
+        Name specific configuration options always override any global options
+        set in the database.
+    </p>
+
+    <p>
+        Chassis-specific configuration options in the database plus the ability
+        to configure the chassis name to use via the
+        <code>system-id-override</code> file or command line allows to run
+        multiple <code>ovn-controller</code> instances with unique chassis
+        names on the same host using the same <code>vswitchd</code> instance.
+        This may be useful when running a hybrid setup with more than one CMS
+        managing ports on the host, or to use different datapath types on the
+        same host. Note that this ability is highly experimental and has known
+        limitations (for example, stateful ACLs are not supported). Use at your
+        own risk.
+    </p>
 
     <p>
       <code>ovn-controller</code> reads the following values from the

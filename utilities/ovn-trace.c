@@ -60,6 +60,9 @@ static char *unixctl_path;
 /* The southbound database. */
 static struct ovsdb_idl *ovnsb_idl;
 
+/* --leader-only, --no-leader-only: Only accept the leader in a cluster. */
+static int leader_only = true;
+
 /* --detailed: Show a detailed, table-by-table trace. */
 static bool detailed;
 
@@ -138,6 +141,7 @@ main(int argc, char *argv[])
                                  1, INT_MAX, ovntrace_trace, NULL);
     }
     ovnsb_idl = ovsdb_idl_create(db, &sbrec_idl_class, true, false);
+    ovsdb_idl_set_leader_only(ovnsb_idl, leader_only);
 
     bool already_read = false;
     for (;;) {
@@ -243,6 +247,8 @@ parse_options(int argc, char *argv[])
 {
     enum {
         OPT_DB = UCHAR_MAX + 1,
+        OPT_LEADER_ONLY,
+        OPT_NO_LEADER_ONLY,
         OPT_UNIXCTL,
         OPT_DETAILED,
         OPT_SUMMARY,
@@ -260,6 +266,8 @@ parse_options(int argc, char *argv[])
     };
     static const struct option long_options[] = {
         {"db", required_argument, NULL, OPT_DB},
+        {"leader-only", no_argument, NULL, OPT_LEADER_ONLY},
+        {"no-leader-only", no_argument, NULL, OPT_NO_LEADER_ONLY},
         {"unixctl", required_argument, NULL, OPT_UNIXCTL},
         {"detailed", no_argument, NULL, OPT_DETAILED},
         {"summary", no_argument, NULL, OPT_SUMMARY},
@@ -292,6 +300,14 @@ parse_options(int argc, char *argv[])
         switch (c) {
         case OPT_DB:
             db = optarg;
+            break;
+
+        case OPT_LEADER_ONLY:
+            leader_only = true;
+            break;
+
+        case OPT_NO_LEADER_ONLY:
+            leader_only = false;
             break;
 
         case OPT_UNIXCTL:
@@ -390,6 +406,7 @@ Output style options:\n\
 Other options:\n\
   --db=DATABASE           connect to DATABASE\n\
                           (default: %s)\n\
+  --no-leader-only        accept any cluster member, not just the leader\n\
   --ovs[=REMOTE]          obtain corresponding OpenFlow flows from REMOTE\n\
                           (default: %s)\n\
   --unixctl=SOCKET        set control socket name\n\
@@ -1469,9 +1486,8 @@ ovntrace_node_prune_hard(struct ovs_list *nodes)
 }
 
 static void
-execute_load(const struct ovnact_load *load,
-             const struct ovntrace_datapath *dp, struct flow *uflow,
-             struct ovs_list *super OVS_UNUSED)
+execute_load(const struct ovnact *ovnact, const struct ovntrace_datapath *dp,
+             struct flow *uflow, struct ovs_list *super OVS_UNUSED)
 {
     const struct ovnact_encode_params ep = {
         .lookup_port = ovntrace_lookup_port,
@@ -1481,7 +1497,7 @@ execute_load(const struct ovnact_load *load,
     uint64_t stub[512 / 8];
     struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(stub);
 
-    ovnacts_encode(&load->ovnact, sizeof *load, &ep, &ofpacts);
+    ovnacts_encode(ovnact, OVNACT_ALIGN(ovnact->len), &ep, &ofpacts);
 
     struct ofpact *a;
     OFPACT_FOR_EACH (a, ofpacts.data, ofpacts.size) {
@@ -1489,12 +1505,11 @@ execute_load(const struct ovnact_load *load,
 
         if (!mf_is_register(sf->field->id)) {
             struct ds s = DS_EMPTY_INITIALIZER;
-            ovnacts_format(&load->ovnact, OVNACT_LOAD_SIZE, &s);
-            ds_chomp(&s, ';');
 
-            char *friendly = ovntrace_make_names_friendly(ds_cstr(&s));
-            ovntrace_node_append(super, OVNTRACE_NODE_MODIFY, "%s", friendly);
-            free(friendly);
+            ovnacts_format(ovnact, OVNACT_ALIGN(ovnact->len), &s);
+            ds_chomp(&s, ';');
+            ovntrace_node_append(super, OVNTRACE_NODE_MODIFY, "%s",
+                                 ds_cstr(&s));
 
             ds_destroy(&s);
         }
@@ -3040,7 +3055,7 @@ trace_actions(const struct ovnact *ovnacts, size_t ovnacts_len,
     const struct ovnact *a;
     OVNACT_FOR_EACH (a, ovnacts, ovnacts_len) {
         ds_clear(&s);
-        ovnacts_format(a, sizeof *a * (ovnact_next(a) - a), &s);
+        ovnacts_format(a, OVNACT_ALIGN(a->len), &s);
         char *friendly = ovntrace_make_names_friendly(ds_cstr(&s));
         ovntrace_node_append(super, OVNTRACE_NODE_ACTION, "%s", friendly);
         free(friendly);
@@ -3055,7 +3070,7 @@ trace_actions(const struct ovnact *ovnacts, size_t ovnacts_len,
             break;
 
         case OVNACT_LOAD:
-            execute_load(ovnact_get_LOAD(a), dp, uflow, super);
+            execute_load(a, dp, uflow, super);
             break;
 
         case OVNACT_MOVE:

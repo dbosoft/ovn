@@ -75,6 +75,8 @@ Scheduling`_ for the timing of each stage:
    2019.10.2, and so on.  The process is the same for these additional release
    as for a .0 release.
 
+.. _long-term-support:
+
 Long-term Support Releases
 --------------------------
 
@@ -93,6 +95,8 @@ LTS releases are scheduled to be released once every two years. This means
 that any given LTS will receive bug fix support for two years, followed by
 one year of critical bug fixes and security fixes.
 
+The current LTS version is documented on the `Long Term Support Releases`__
+page of `ovn.org`__.
 
 Release Numbering
 -----------------
@@ -134,23 +138,9 @@ approximate:
 Release Calendar
 ----------------
 
-The 2022 timetable is shown below. Note that these dates are not set in stone.
+The 2023 timetable is shown below. Note that these dates are not set in stone.
 If extenuating circumstances arise, a release may be delayed from its target
 date.
-
-+---------+-------------+-----------------+---------+
-| Release | Soft Freeze | Branch Creation | Release |
-+---------+-------------+-----------------+---------+
-| 22.03.0 | Feb 4       | Feb 18          | Mar 4   |
-+---------+-------------+-----------------+---------+
-| 22.06.0 | May 6       | May 20          | Jun 3   |
-+---------+-------------+-----------------+---------+
-| 22.09.0 | Aug 5       | Aug 19          | Sep 2   |
-+---------+-------------+-----------------+---------+
-| 22.12.0 | Nov 4       | Nov 18          | Dec 2   |
-+---------+-------------+-----------------+---------+
-
-Below is the 2023 timetable
 
 +---------+-------------+-----------------+---------+
 | Release | Soft Freeze | Branch Creation | Release |
@@ -164,7 +154,24 @@ Below is the 2023 timetable
 | 23.12.0 | Nov 3       | Nov 17          | Dec 1   |
 +---------+-------------+-----------------+---------+
 
+Below is the 2024 timetable
+
++---------+-------------+-----------------+---------+
+| Release | Soft Freeze | Branch Creation | Release |
++---------+-------------+-----------------+---------+
+| 24.03.0 | Feb 2       | Feb 16          | Mar 1   |
++---------+-------------+-----------------+---------+
+| 24.06.0 | May 10      | May 24          | Jun 7   |
++---------+-------------+-----------------+---------+
+| 24.09.0 | Aug 9       | Aug 23          | Sep 6   |
++---------+-------------+-----------------+---------+
+| 24.12.0 | Nov 8       | Nov 22          | Dec 6   |
++---------+-------------+-----------------+---------+
+
 Contact
 -------
 
 Use dev@openvswitch.org to discuss the OVN development and release process.
+
+__ https://www.ovn.org/en/releases/long_term_support/
+__ https://www.ovn.org

@@ -34,9 +34,12 @@
 #include "en-lflow.h"
 #include "en-northd-output.h"
 #include "en-sync-sb.h"
+#include "unixctl.h"
 #include "util.h"
 
 VLOG_DEFINE_THIS_MODULE(inc_proc_northd);
+
+static unixctl_cb_func chassis_features_list;
 
 #define NB_NODES \
     NB_NODE(nb_global, "nb_global") \
@@ -52,6 +55,7 @@ VLOG_DEFINE_THIS_MODULE(inc_proc_northd);
     NB_NODE(acl, "acl") \
     NB_NODE(logical_router, "logical_router") \
     NB_NODE(qos, "qos") \
+    NB_NODE(mirror, "mirror") \
     NB_NODE(meter, "meter") \
     NB_NODE(meter_band, "meter_band") \
     NB_NODE(logical_router_port, "logical_router_port") \
@@ -95,6 +99,7 @@ VLOG_DEFINE_THIS_MODULE(inc_proc_northd);
     SB_NODE(logical_flow, "logical_flow") \
     SB_NODE(logical_dp_group, "logical_DP_group") \
     SB_NODE(multicast_group, "multicast_group") \
+    SB_NODE(mirror, "mirror") \
     SB_NODE(meter, "meter") \
     SB_NODE(meter_band, "meter_band") \
     SB_NODE(datapath_binding, "datapath_binding") \
@@ -178,6 +183,7 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_northd, &en_nb_acl, NULL);
     engine_add_input(&en_northd, &en_nb_logical_router, NULL);
     engine_add_input(&en_northd, &en_nb_qos, NULL);
+    engine_add_input(&en_northd, &en_nb_mirror, NULL);
     engine_add_input(&en_northd, &en_nb_meter, NULL);
     engine_add_input(&en_northd, &en_nb_meter_band, NULL);
     engine_add_input(&en_northd, &en_nb_logical_router_port, NULL);
@@ -200,6 +206,7 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_northd, &en_sb_encap, NULL);
     engine_add_input(&en_northd, &en_sb_port_group, NULL);
     engine_add_input(&en_northd, &en_sb_logical_dp_group, NULL);
+    engine_add_input(&en_northd, &en_sb_mirror, NULL);
     engine_add_input(&en_northd, &en_sb_meter, NULL);
     engine_add_input(&en_northd, &en_sb_meter_band, NULL);
     engine_add_input(&en_northd, &en_sb_datapath_binding, NULL);
@@ -232,9 +239,6 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_add_input(&en_lflow, &en_sb_multicast_group, NULL);
     engine_add_input(&en_lflow, &en_sb_igmp_group, NULL);
     engine_add_input(&en_lflow, &en_northd, NULL);
-    /* XXX: The "en_mac_binding_aging" should be separate "root" node
-     * once I-P engine allows multiple root nodes. */
-    engine_add_input(&en_lflow, &en_mac_binding_aging, NULL);
 
     engine_add_input(&en_sync_to_sb_addr_set, &en_nb_address_set,
                      sync_to_sb_addr_set_nb_address_set_handler);
@@ -252,6 +256,8 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
                      northd_output_sync_to_sb_handler);
     engine_add_input(&en_northd_output, &en_lflow,
                      northd_output_lflow_handler);
+    engine_add_input(&en_northd_output, &en_mac_binding_aging,
+                     northd_output_mac_binding_aging_handler);
 
     struct engine_arg engine_arg = {
         .nb_idl = nb->idl,
@@ -302,9 +308,16 @@ void inc_proc_northd_init(struct ovsdb_idl_loop *nb,
     engine_ovsdb_node_add_index(&en_sb_address_set,
                                 "sbrec_address_set_by_name",
                                 sbrec_address_set_by_name);
+
+    struct northd_data *northd_data =
+        engine_get_internal_data(&en_northd);
+    unixctl_command_register("debug/chassis-features-list", "", 0, 0,
+                             chassis_features_list,
+                             &northd_data->features);
 }
 
-void inc_proc_northd_run(struct ovsdb_idl_txn *ovnnb_txn,
+/* Returns true if the incremental processing ended up updating nodes. */
+bool inc_proc_northd_run(struct ovsdb_idl_txn *ovnnb_txn,
                          struct ovsdb_idl_txn *ovnsb_txn,
                          bool recompute) {
     engine_init_run();
@@ -343,10 +356,28 @@ void inc_proc_northd_run(struct ovsdb_idl_txn *ovnnb_txn,
     } else {
         engine_set_force_recompute(false);
     }
+    return engine_has_updated();
 }
 
 void inc_proc_northd_cleanup(void)
 {
     engine_cleanup();
     engine_set_context(NULL);
+}
+
+static void
+chassis_features_list(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                      const char *argv[] OVS_UNUSED, void *features_)
+{
+    struct chassis_features *features = features_;
+    struct ds ds = DS_EMPTY_INITIALIZER;
+
+    ds_put_format(&ds, "ct_no_masked_label:    %s\n",
+                  features->ct_no_masked_label ? "true" : "false");
+    ds_put_format(&ds, "ct_lb_related:         %s\n",
+                  features->ct_lb_related ? "true" : "false");
+    ds_put_format(&ds, "mac_binding_timestamp: %s\n",
+                  features->mac_binding_timestamp ? "true" : "false");
+    unixctl_command_reply(conn, ds_cstr(&ds));
+    ds_destroy(&ds);
 }

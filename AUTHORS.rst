@@ -35,8 +35,10 @@ Name                               Email
 ================================== ===============================================
 Aaron Conole                       aconole@redhat.com
 Aaron Rosen                        arosen@clemson.edu
+Abhiram R N                        abhiramrn@gmail.com
 Aidan Shribman                     aidan.shribman@gmail.com
 Alan Pevec                         alan.pevec@redhat.com
+Ales Musil                         amusil@redhat.com
 Alexander Duyck                    alexander.h.duyck@redhat.com
 Alexandru Copot                    alex.mihai.c@gmail.com
 Alexei Starovoitov                 ast@plumgrid.com
@@ -125,6 +127,7 @@ Dongdong                           dongdong1@huawei.com
 Dongjun                            dongj@dtdream.com
 Duan Jiong                         djduanjiong@gmail.com
 Duffie Cooley
+Dumitru Ceara                      dceara@redhat.com
 Dustin Lundquist                   dustin@null-ptr.net
 Ed Maste                           emaste@freebsd.org
 Ed Swierk                          eswierk@skyportsystems.com
@@ -136,6 +139,7 @@ Esteban Rodriguez Betancourt       estebarb@hpe.com
 Aymerich Edward                    edward.aymerich@hpe.com
 Edward Tomasz Napierała            trasz@freebsd.org
 Eitan Eliahu                       eliahue@vmware.com
+Enrique Llorente                   ellorent@redhat.com
 Eohyung Lee                        liquidnuker@gmail.com
 Eric Dumazet                       edumazet@google.com
 Eric Garver                        e@erig.me
@@ -144,6 +148,7 @@ Ethan J. Jackson                   ejj@eecs.berkeley.edu
 Ethan Rahn                         erahn@arista.com
 Eziz Durdyyev                      ezizdurdy@gmail.com
 Fabrizio D'Angelo                  fdangelo@redhat.com
+Felix Huettner                     felix.huettner@mail.schwarz
 Flavio Fernandes                   flavio@flaviof.com
 Flavio Leitner                     fbl@redhat.com
 Francesco Fusco                    ffusco@redhat.com
@@ -369,6 +374,7 @@ Steve Ruan                         ruansx@cn.ibm.com
 Stuart Cardall                     developer@it-offshore.co.uk
 Sugesh Chandran                    sugesh.chandran@intel.com
 SUGYO Kazushi                      sugyo.org@gmail.com
+Surya Seetharaman                  suryaseetharaman.9@gmail.com
 Sven Haardiek                      sven.haardiek@uni-muenster.de
 Tadaaki Nagao                      nagao@stratosphere.co.jp
 Terry Wilson                       twilson@redhat.com
@@ -392,6 +398,7 @@ Tony van der Peet                  tony.vanderpeet@alliedtelesis.co.nz
 Tonghao Zhang                      xiangxia.m.yue@gmail.com
 Valient Gough                      vgough@pobox.com
 Vanou Ishii                        ishii.vanou@fujitsu.com
+Veda Barrenkala                    vedabarrenkala@gmail.com
 Venkata Anil Kommaddi              vkommadi@redhat.com
 Venu Iyer                          venugopali@nvidia.com
 Vishal Deep Ajmera                 vishal.deep.ajmera@ericsson.com

@@ -19,6 +19,7 @@
 
 #include <sys/types.h>
 #include <netinet/in.h>
+#include "lib/smap.h"
 #include "openvswitch/hmap.h"
 #include "ovn-util.h"
 #include "sset.h"
@@ -62,6 +63,9 @@ struct ovn_northd_lb {
     char *selection_fields;
     struct ovn_lb_vip *vips;
     struct ovn_northd_lb_vip *vips_nb;
+    struct smap template_vips; /* Slightly changed template VIPs, populated
+                                * if needed.  Until now it's only required
+                                * for IPv6 template load balancers. */
     size_t n_vips;
 
     enum lb_neighbor_responder_mode neigh_mode;
@@ -75,12 +79,10 @@ struct ovn_northd_lb {
     struct sset ips_v6;
 
     size_t n_nb_ls;
-    size_t n_allocated_nb_ls;
-    struct ovn_datapath **nb_ls;
+    unsigned long *nb_ls_map;
 
     size_t n_nb_lr;
-    size_t n_allocated_nb_lr;
-    struct ovn_datapath **nb_lr;
+    unsigned long *nb_lr_map;
 };
 
 struct ovn_lb_vip {
@@ -127,9 +129,11 @@ struct ovn_northd_lb_backend {
     const struct sbrec_service_monitor *sbrec_monitor;
 };
 
-struct ovn_northd_lb *ovn_northd_lb_create(const struct nbrec_load_balancer *);
+struct ovn_northd_lb *ovn_northd_lb_create(const struct nbrec_load_balancer *,
+                                           size_t n_datapaths);
 struct ovn_northd_lb *ovn_northd_lb_find(const struct hmap *,
                                          const struct uuid *);
+const struct smap *ovn_northd_lb_get_vips(const struct ovn_northd_lb *);
 void ovn_northd_lb_destroy(struct ovn_northd_lb *);
 void ovn_northd_lb_add_lr(struct ovn_northd_lb *lb, size_t n,
                           struct ovn_datapath **ods);
@@ -173,7 +177,11 @@ ovn_lb_group_add_lr(struct ovn_lb_group *lb_group, struct ovn_datapath *lr)
 }
 
 struct ovn_controller_lb {
+    struct hmap_node hmap_node;
+
     const struct sbrec_load_balancer *slb; /* May be NULL. */
+
+    uint8_t proto;
 
     struct ovn_lb_vip *vips;
     size_t n_vips;
@@ -192,6 +200,10 @@ struct ovn_controller_lb *ovn_controller_lb_create(
     const struct smap *template_vars,
     struct sset *template_vars_ref);
 void ovn_controller_lb_destroy(struct ovn_controller_lb *);
+void ovn_controller_lbs_destroy(struct hmap *ovn_controller_lbs);
+struct ovn_controller_lb *ovn_controller_lb_find(
+    const struct hmap *ovn_controller_lbs,
+    const struct uuid *uuid);
 
 char *ovn_lb_vip_init(struct ovn_lb_vip *lb_vip, const char *lb_key,
                       const char *lb_value, bool template, int address_family);
@@ -200,5 +212,26 @@ void ovn_lb_vip_format(const struct ovn_lb_vip *vip, struct ds *s,
                        bool template);
 void ovn_lb_vip_backends_format(const struct ovn_lb_vip *vip, struct ds *s,
                                 bool template);
+
+struct ovn_lb_5tuple {
+    struct hmap_node hmap_node;
+
+    struct in6_addr vip_ip;
+    uint16_t vip_port;
+
+    struct in6_addr backend_ip;
+    uint16_t backend_port;
+
+    uint8_t proto;
+};
+
+void ovn_lb_5tuple_init(struct ovn_lb_5tuple *tuple,
+                        const struct ovn_lb_vip *vip,
+                        const struct ovn_lb_backend *backend, uint8_t proto);
+void ovn_lb_5tuple_add(struct hmap *tuples, const struct ovn_lb_vip *vip,
+                       const struct ovn_lb_backend *backend, uint8_t proto);
+void ovn_lb_5tuple_find_and_delete(struct hmap *tuples,
+                                   const struct ovn_lb_5tuple *tuple);
+void ovn_lb_5tuples_destroy(struct hmap *tuples);
 
 #endif /* OVN_LIB_LB_H 1 */

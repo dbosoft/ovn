@@ -503,9 +503,9 @@ populate_remote_chassis_macs(const struct sbrec_chassis *my_chassis,
         }
 
         const char *tokens
-            = get_chassis_mac_mappings(&chassis->other_config);
+            = get_chassis_mac_mappings(&chassis->other_config, chassis->name);
 
-        if (!strlen(tokens)) {
+        if (!tokens[0]) {
             continue;
         }
 
@@ -843,6 +843,7 @@ put_drop(const struct physical_debug *debug, uint8_t table_id,
         os->collector_set_id = debug->collector_set_id;
         os->obs_domain_id = (debug->obs_domain_id << 24);
         os->obs_point_id = table_id;
+        os->sampling_port = OFPP_NONE;
     }
 }
 
@@ -1498,6 +1499,7 @@ consider_port_binding(struct ovsdb_idl_index *sbrec_port_binding_by_name,
         if (!strcmp(binding->type, "localnet")) {
             /* do not forward traffic from localport to localnet port */
             ofpbuf_clear(ofpacts_p);
+            put_drop(debug, OFTABLE_CHECK_LOOPBACK, ofpacts_p);
             match_outport_dp_and_port_keys(&match, dp_key, port_key);
             match_set_reg_masked(&match, MFF_LOG_FLAGS - MFF_REG0,
                                  MLF_LOCALPORT, MLF_LOCALPORT);

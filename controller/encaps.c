@@ -15,6 +15,7 @@
 
 #include <config.h>
 #include "encaps.h"
+#include "chassis.h"
 
 #include "lib/hash.h"
 #include "lib/sset.h"
@@ -22,6 +23,7 @@
 #include "lib/vswitch-idl.h"
 #include "openvswitch/vlog.h"
 #include "lib/ovn-sb-idl.h"
+#include "lib/ovsdb-idl.h"
 #include "ovn-controller.h"
 #include "smap.h"
 
@@ -59,6 +61,7 @@ struct tunnel_ctx {
     struct sset port_names;
 
     struct ovsdb_idl_txn *ovs_txn;
+    const struct ovsrec_open_vswitch_table *ovs_table;
     const struct ovsrec_bridge *br_int;
     const struct sbrec_chassis *this_chassis;
 };
@@ -71,11 +74,10 @@ struct chassis_node {
 static char *
 tunnel_create_name(struct tunnel_ctx *tc, const char *chassis_id)
 {
-    int i;
-
-    for (i = 0; i < UINT16_MAX; i++) {
-        char *port_name;
-        port_name = xasprintf("ovn-%.6s-%x", chassis_id, i);
+    for (int i = 0; i < UINT16_MAX; i++) {
+        const char *idx = get_chassis_idx(tc->ovs_table);
+        char *port_name = xasprintf(
+            "ovn%s-%.*s-%x", idx, idx[0] ? 5 : 6, chassis_id, i);
 
         if (!sset_contains(&tc->port_names, port_name)) {
             return port_name;
@@ -183,24 +185,29 @@ tunnel_add(struct tunnel_ctx *tc, const struct sbrec_sb_global *sbg,
     bool set_local_ip = false;
     if (cfg) {
         /* If the tos option is configured, get it */
-        const char *encap_tos = smap_get_def(&cfg->external_ids,
-           "ovn-encap-tos", "none");
+        const char *encap_tos =
+            get_chassis_external_id_value(
+                &cfg->external_ids, tc->this_chassis->name,
+                "ovn-encap-tos", "none");
 
         if (encap_tos && strcmp(encap_tos, "none")) {
             smap_add(&options, "tos", encap_tos);
         }
 
         /* If the df_default option is configured, get it */
-
-        const char *encap_df = smap_get(&cfg->external_ids,
-           "ovn-encap-df_default");
+        const char *encap_df =
+            get_chassis_external_id_value(
+                &cfg->external_ids, tc->this_chassis->name,
+                "ovn-encap-df_default", NULL);
         if (encap_df) {
             smap_add(&options, "df_default", encap_df);
         }
 
         /* If ovn-set-local-ip option is configured, get it */
-        set_local_ip = smap_get_bool(&cfg->external_ids, "ovn-set-local-ip",
-                                     false);
+        set_local_ip =
+            get_chassis_external_id_value_bool(
+                &cfg->external_ids, tc->this_chassis->name,
+                "ovn-set-local-ip", false);
     }
 
     /* Add auth info if ipsec is enabled. */
@@ -381,7 +388,6 @@ chassis_tzones_overlap(const struct sset *transport_zones,
 
 void
 encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
-           const struct ovsrec_bridge_table *bridge_table,
            const struct ovsrec_bridge *br_int,
            const struct sbrec_chassis_table *chassis_table,
            const struct sbrec_chassis *this_chassis,
@@ -394,13 +400,13 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
     }
 
     const struct sbrec_chassis *chassis_rec;
-    const struct ovsrec_bridge *br;
 
     struct tunnel_ctx tc = {
         .chassis = SHASH_INITIALIZER(&tc.chassis),
         .port_names = SSET_INITIALIZER(&tc.port_names),
         .br_int = br_int,
-        .this_chassis = this_chassis
+        .this_chassis = this_chassis,
+        .ovs_table = ovs_table,
     };
 
     tc.ovs_txn = ovs_idl_txn;
@@ -411,27 +417,25 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
     /* Collect all port names into tc.port_names.
      *
      * Collect all the OVN-created tunnels into tc.tunnel_hmap. */
-    OVSREC_BRIDGE_TABLE_FOR_EACH (br, bridge_table) {
-        for (size_t i = 0; i < br->n_ports; i++) {
-            const struct ovsrec_port *port = br->ports[i];
-            sset_add(&tc.port_names, port->name);
+    for (size_t i = 0; i < br_int->n_ports; i++) {
+        const struct ovsrec_port *port = br_int->ports[i];
+        sset_add(&tc.port_names, port->name);
 
-            /*
-             * note that the id here is not just the chassis name, but the
-             * combination of <chassis_name><delim><encap_ip>
-             */
-            const char *id = smap_get(&port->external_ids, "ovn-chassis-id");
-            if (id) {
-                if (!shash_find(&tc.chassis, id)) {
-                    struct chassis_node *chassis = xzalloc(sizeof *chassis);
-                    chassis->bridge = br;
-                    chassis->port = port;
-                    shash_add_assert(&tc.chassis, id, chassis);
-                } else {
-                    /* Duplicate port for ovn-chassis-id.  Arbitrarily choose
-                     * to delete this one. */
-                    ovsrec_bridge_update_ports_delvalue(br, port);
-                }
+        /*
+         * note that the id here is not just the chassis name, but the
+         * combination of <chassis_name><delim><encap_ip>
+         */
+        const char *id = smap_get(&port->external_ids, "ovn-chassis-id");
+        if (id) {
+            if (!shash_find(&tc.chassis, id)) {
+                struct chassis_node *chassis = xzalloc(sizeof *chassis);
+                chassis->bridge = br_int;
+                chassis->port = port;
+                shash_add_assert(&tc.chassis, id, chassis);
+            } else {
+                /* Duplicate port for ovn-chassis-id.  Arbitrarily choose
+                 * to delete this one. */
+                ovsrec_bridge_update_ports_delvalue(br_int, port);
             }
         }
     }

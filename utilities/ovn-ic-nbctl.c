@@ -112,7 +112,9 @@ main(int argc, char *argv[])
     ctl_timeout_setup(timeout);
 
     /* Initialize IDL. */
-    idl = the_idl = ovsdb_idl_create(db, &icnbrec_idl_class, true, false);
+    idl = the_idl = ovsdb_idl_create_unconnected(&icnbrec_idl_class, true);
+    ovsdb_idl_set_remote(idl, db, false);
+    ovsdb_idl_set_db_change_aware(idl, false);
     ovsdb_idl_set_leader_only(idl, leader_only);
     run_prerequisites(commands, n_commands, idl);
 
@@ -675,9 +677,9 @@ static const struct ctl_table_class tables[ICNBREC_N_TABLES] = {
 
 static void
 ic_nbctl_context_init_command(struct ic_nbctl_context *ic_nbctl_ctx,
-                           struct ctl_command *command)
+                           struct ctl_command *command, bool last_command)
 {
-    ctl_context_init_command(&ic_nbctl_ctx->base, command);
+    ctl_context_init_command(&ic_nbctl_ctx->base, command, last_command);
 }
 
 static void
@@ -762,7 +764,8 @@ do_ic_nbctl(const char *args, struct ctl_command *commands, size_t n_commands,
     }
     ic_nbctl_context_init(&ic_nbctl_ctx, NULL, idl, txn, symtab);
     for (c = commands; c < &commands[n_commands]; c++) {
-        ic_nbctl_context_init_command(&ic_nbctl_ctx, c);
+        ic_nbctl_context_init_command(&ic_nbctl_ctx, c,
+                                      c == &commands[n_commands - 1]);
         if (c->syntax->run) {
             (c->syntax->run)(&ic_nbctl_ctx.base);
         }

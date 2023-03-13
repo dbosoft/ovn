@@ -105,18 +105,34 @@ is_dynamic_lsp_address(const char *address)
     char ipv6_s[IPV6_SCAN_LEN + 1];
     struct eth_addr ea;
     ovs_be32 ip;
-    int n;
-    return (!strcmp(address, "dynamic")
-            || (ovs_scan(address, "dynamic "IP_SCAN_FMT"%n",
-                         IP_SCAN_ARGS(&ip), &n)
-                         && address[n] == '\0')
-            || (ovs_scan(address, "dynamic "IP_SCAN_FMT" "IPV6_SCAN_FMT"%n",
-                         IP_SCAN_ARGS(&ip), ipv6_s, &n)
-                         && address[n] == '\0')
-            || (ovs_scan(address, "dynamic "IPV6_SCAN_FMT"%n",
-                         ipv6_s, &n) && address[n] == '\0')
-            || (ovs_scan(address, ETH_ADDR_SCAN_FMT" dynamic%n",
-                         ETH_ADDR_SCAN_ARGS(ea), &n) && address[n] == '\0'));
+    int n = 0;
+
+    if (!strncmp(address, "dynamic", 7)) {
+        n = 7;
+        if (!address[n]) {
+            /* "dynamic" */
+            return true;
+        }
+        if (ovs_scan_len(address, &n, " "IP_SCAN_FMT, IP_SCAN_ARGS(&ip))
+            && !address[n]) {
+            /* "dynamic x.x.x.x" */
+            return true;
+        }
+        if (ovs_scan_len(address, &n, " "IPV6_SCAN_FMT, ipv6_s)
+            && !address[n]) {
+            /* Either "dynamic xxxx::xxxx" or "dynamic x.x.x.x xxxx::xxxx". */
+            return true;
+        }
+        return false;
+    }
+
+    if (ovs_scan_len(address, &n, ETH_ADDR_SCAN_FMT" dynamic",
+                     ETH_ADDR_SCAN_ARGS(ea)) && !address[n]) {
+        /* "xx:xx:xx:xx:xx:xx dynamic" */
+        return true;
+    }
+
+    return false;
 }
 
 static bool
@@ -128,7 +144,6 @@ parse_and_store_addresses(const char *address, struct lport_addresses *laddrs,
     const char *buf = address;
     const char *const start = buf;
     int buf_index = 0;
-    const char *buf_end = buf + strlen(address);
 
     if (extract_eth_addr) {
         if (!ovs_scan_len(buf, &buf_index, ETH_ADDR_SCAN_FMT,
@@ -151,7 +166,7 @@ parse_and_store_addresses(const char *address, struct lport_addresses *laddrs,
      * and store in the 'laddrs'. Break the loop if invalid data is found.
      */
     buf += buf_index;
-    while (buf < buf_end) {
+    while (*buf != '\0') {
         buf_index = 0;
         error = ip_parse_cidr_len(buf, &buf_index, &ip4, &plen);
         if (!error) {
@@ -205,7 +220,7 @@ extract_lsp_addresses(const char *address, struct lport_addresses *laddrs)
     int ofs;
     bool success = extract_addresses(address, laddrs, &ofs);
 
-    if (success && ofs < strlen(address)) {
+    if (success && address[ofs]) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
         VLOG_INFO_RL(&rl, "invalid syntax '%s' in address", address);
     }
@@ -825,24 +840,6 @@ ovn_get_internal_version(void)
                      N_OVNACTS, OVN_INTERNAL_MINOR_VER);
 }
 
-unsigned int
-ovn_parse_internal_version_minor(const char *ver)
-{
-    const char *p = ver + strlen(ver);
-    for (int i = 0; i < strlen(ver); i++) {
-        if (*p == '.') {
-            break;
-        }
-        p--;
-    }
-
-    unsigned int minor;
-    if (ovs_scan(p, ".%u", &minor)) {
-        return minor;
-    }
-    return 0;
-}
-
 #ifdef DDLOG
 /* Callbacks used by the ddlog northd code to print warnings and errors. */
 void
@@ -964,4 +961,134 @@ char *
 lr_lb_address_set_ref(uint32_t lr_tunnel_key, int addr_family)
 {
     return lr_lb_address_set_name_(lr_tunnel_key, "$", addr_family);
+}
+
+static char *
+chassis_option_key(const char *option_key, const char *chassis_id)
+{
+    if (!chassis_id) {
+        return xasprintf("%s", option_key);
+    }
+    return xasprintf("%s-%s", option_key, chassis_id);
+}
+
+const char *
+get_chassis_external_id_value(const struct smap *external_ids,
+                              const char *chassis_id,
+                              const char *option_key,
+                              const char *def)
+{
+    char *chassis_key = chassis_option_key(option_key, chassis_id);
+    const char *ret =
+        smap_get_def(external_ids, chassis_key,
+                     smap_get_def(external_ids, option_key, def));
+    free(chassis_key);
+    return ret;
+}
+
+int
+get_chassis_external_id_value_int(const struct smap *external_ids,
+                                  const char *chassis_id,
+                                  const char *option_key,
+                                  int def)
+{
+    char *chassis_key = chassis_option_key(option_key, chassis_id);
+    int ret =
+        smap_get_int(external_ids, chassis_key,
+                     smap_get_int(external_ids, option_key, def));
+    free(chassis_key);
+    return ret;
+}
+
+unsigned int
+get_chassis_external_id_value_uint(const struct smap *external_ids,
+                                   const char *chassis_id,
+                                   const char *option_key,
+                                   unsigned int def)
+{
+    char *chassis_key = chassis_option_key(option_key, chassis_id);
+    unsigned int ret =
+        smap_get_uint(external_ids, chassis_key,
+                      smap_get_uint(external_ids, option_key, def));
+    free(chassis_key);
+    return ret;
+}
+
+unsigned long long int
+get_chassis_external_id_value_ullong(const struct smap *external_ids,
+                                     const char *chassis_id,
+                                     const char *option_key,
+                                     unsigned long long int def)
+{
+    char *chassis_key = chassis_option_key(option_key, chassis_id);
+    unsigned long long int ret =
+        smap_get_ullong(external_ids, chassis_key,
+                        smap_get_ullong(external_ids, option_key, def));
+    free(chassis_key);
+    return ret;
+}
+
+bool
+get_chassis_external_id_value_bool(const struct smap *external_ids,
+                                   const char *chassis_id,
+                                   const char *option_key,
+                                   bool def)
+{
+    char *chassis_key = chassis_option_key(option_key, chassis_id);
+    bool ret =
+        smap_get_bool(external_ids, chassis_key,
+                      smap_get_bool(external_ids, option_key, def));
+    free(chassis_key);
+    return ret;
+}
+
+void flow_collector_ids_init(struct flow_collector_ids *ids)
+{
+    ovs_list_init(&ids->list);
+}
+
+void flow_collector_ids_init_from_table(struct flow_collector_ids *ids,
+    const struct ovsrec_flow_sample_collector_set_table *table)
+{
+    flow_collector_ids_init(ids);
+    const struct ovsrec_flow_sample_collector_set *ovs_collector_set;
+    OVSREC_FLOW_SAMPLE_COLLECTOR_SET_TABLE_FOR_EACH (ovs_collector_set,
+                                                    table) {
+        flow_collector_ids_add(ids, ovs_collector_set->id);
+    }
+}
+
+void flow_collector_ids_add(struct flow_collector_ids *ids,
+                            uint64_t id)
+{
+    struct flow_collector_id *collector = xzalloc(sizeof *collector);
+    collector->id = id;
+    ovs_list_push_back(&ids->list, &collector->node);
+}
+
+bool flow_collector_ids_lookup(const struct flow_collector_ids *ids,
+                               uint32_t id)
+{
+    struct flow_collector_id *collector;
+    LIST_FOR_EACH (collector, node, &ids->list) {
+        if (collector->id == id) {
+          return true;
+        }
+    }
+    return false;
+}
+
+void flow_collector_ids_destroy(struct flow_collector_ids *ids)
+{
+    struct flow_collector_id *collector;
+    LIST_FOR_EACH_SAFE (collector, node, &ids->list) {
+        ovs_list_remove(&collector->node);
+        free(collector);
+    }
+}
+
+void flow_collector_ids_clear(struct flow_collector_ids *ids)
+{
+    flow_collector_ids_destroy(ids);
+    flow_collector_ids_init(ids);
 }

@@ -1,7 +1,17 @@
-Post v22.12.0
+Post v23.03.0
 -------------
+  - Enhance LSP.options:arp_proxy to support IPv6, configurable MAC
+    addresses and CIDRs.
 
-OVN v22.12.0 - xx xxx xxxx
+OVN v23.03.0 - 03 Mar 2023
+--------------------------
+  - ovn-controller: Experimental support for co-hosting multiple controller
+    instances on the same host.
+  - Add ovn-ctl commands for (re)starting/stopping OVSDB relay for OVN SB DB.
+  - Add new ovn-db@.service systemd unit to run ovsdb-servers in separate
+    systemd units.
+
+OVN v22.12.0 - 16 Dec 2022
 --------------------------
   - Add load balancer "affinity_timeout" option to configure load balancing
     of traffic from a particular client to the same backend for a given
@@ -10,6 +20,11 @@ OVN v22.12.0 - xx xxx xxxx
     per-flow IPFIX sampling.
   - Add support for component templates within logical flows and load
     balancers.
+  - Add support for remote port mirroring (Experimental).
+  - Add new OVN IC Route table index. This index ensures no duplicate routes
+    can be advertized.  When upgrading to this version user must ensure that
+    all ovn-ic daemons in all availability zones are upgraded before ovn-ic SB
+    database schema is converted.
 
 OVN v22.09.0 - 16 Sep 2022
 --------------------------
