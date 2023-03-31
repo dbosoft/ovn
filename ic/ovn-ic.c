@@ -35,6 +35,7 @@
 #include "lib/ovn-util.h"
 #include "memory.h"
 #include "openvswitch/poll-loop.h"
+#include "ovsdb-idl.h"
 #include "simap.h"
 #include "smap.h"
 #include "sset.h"
@@ -1871,6 +1872,31 @@ update_ssl_config(void)
     }
 }
 
+static void
+update_idl_probe_interval(struct ovsdb_idl *ovn_sb_idl,
+                          struct ovsdb_idl *ovn_nb_idl,
+                          struct ovsdb_idl *ovn_icsb_idl,
+                          struct ovsdb_idl *ovn_icnb_idl)
+{
+    const struct nbrec_nb_global *nb = nbrec_nb_global_first(ovn_nb_idl);
+    int interval = -1;
+    if (nb) {
+        interval = smap_get_int(&nb->options, "ic_probe_interval", interval);
+    }
+    set_idl_probe_interval(ovn_sb_idl, ovnsb_db, interval);
+    set_idl_probe_interval(ovn_nb_idl, ovnnb_db, interval);
+
+    const struct icnbrec_ic_nb_global *icnb =
+        icnbrec_ic_nb_global_first(ovn_icnb_idl);
+    int ic_interval = -1;
+    if (icnb) {
+        ic_interval = smap_get_int(&icnb->options, "ic_probe_interval",
+                                   ic_interval);
+    }
+    set_idl_probe_interval(ovn_icsb_idl, ovn_ic_sb_db, ic_interval);
+    set_idl_probe_interval(ovn_icnb_idl, ovn_ic_nb_db, ic_interval);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -2065,12 +2091,23 @@ main(int argc, char *argv[])
                                   &icsbrec_route_col_transit_switch,
                                   &icsbrec_route_col_availability_zone);
 
+    unixctl_command_register("nb-connection-status", "", 0, 0,
+                             ovn_conn_show, ovnnb_idl_loop.idl);
+    unixctl_command_register("sb-connection-status", "", 0, 0,
+                             ovn_conn_show, ovnsb_idl_loop.idl);
+    unixctl_command_register("ic-nb-connection-status", "", 0, 0,
+                             ovn_conn_show, ovninb_idl_loop.idl);
+    unixctl_command_register("ic-sb-connection-status", "", 0, 0,
+                             ovn_conn_show, ovnisb_idl_loop.idl);
+
     /* Main loop. */
     exiting = false;
     state.had_lock = false;
     state.paused = false;
     while (!exiting) {
         update_ssl_config();
+        update_idl_probe_interval(ovnsb_idl_loop.idl, ovnnb_idl_loop.idl,
+                                  ovnisb_idl_loop.idl, ovninb_idl_loop.idl);
         memory_run();
         if (memory_should_report()) {
             struct simap usage = SIMAP_INITIALIZER(&usage);

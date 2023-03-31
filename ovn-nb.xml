@@ -202,6 +202,19 @@
         </p>
       </column>
 
+      <column name="options" key="ic_probe_interval">
+        <p>
+          The inactivity probe interval of the connection to the OVN Northbound
+          and Southbound databases from <code>ovn-ic</code>, in milliseconds.
+          If the value is zero, it disables the connection keepalive feature.
+        </p>
+
+        <p>
+          If the value is nonzero, then it will be forced to a value of
+          at least 1000 ms.
+        </p>
+      </column>
+
       <column name="options" key="northd_trim_timeout">
         <p>
           When used, this configuration value specifies the time, in
@@ -728,6 +741,18 @@
         switch with a tag=0 localnet port. If not properly isolated from other
         localnet ports, fabric traffic that belongs to other tagged networks may
         be passed through such a port.
+      </column>
+
+      <column name="other_config" key="broadcast-arps-to-all-routers"
+          type='{"type": "boolean"}'>
+        Determines whether arp requests and ipv6 neighbor solicitations should
+        be sent to all routers and other switchports (default) or if it should
+        only be sent to switchports where the ip/mac address is unknown.
+        Setting this to false can significantly reduce the load if the logical
+        switch can receive arp requests for ips it does not know about.
+        However setting this to false also means that garps are no longer
+        forwarded to all routers and therefor the mac bindings of the routers
+        are no longer updated.
       </column>
     </group>
 
@@ -2040,6 +2065,14 @@ or
         from the same client to this lb to the same backend if received in
         the affinity timeslot. Max supported affinity_timeout is 65535
         seconds.
+      </column>
+
+      <column name="options" key="ct_flush" type='{"type": "boolean"}'>
+        The value indicates whether ovn-controller should flush CT entries
+        that are related to this LB. The flush happens if the LB is removed,
+        any of the backends is updated/removed or the LB is not considered
+        local anymore by the ovn-controller. This option is set to
+        <code>false</code> by default.
       </column>
     </group>
   </table>

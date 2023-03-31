@@ -4850,9 +4850,9 @@ NS_CHECK_EXEC([lsp], [tcpdump -l -nn -c 3 -i lsp ${filter} > lsp.pcap 2>tcpdump_
 OVS_WAIT_UNTIL([grep "listening" tcpdump_err])
 
 # Generate IPv4 UDP hairpin traffic.
-NS_CHECK_EXEC([lsp], [echo a | nc -u 88.88.88.88 4040 &], [0])
-NS_CHECK_EXEC([lsp], [echo a | nc -u 88.88.88.89 4040 &], [0])
-NS_CHECK_EXEC([lsp], [echo a | nc -u 88.88.88.90 2021 &], [0])
+NS_CHECK_EXEC([lsp], [echo a | nc -u 88.88.88.88 4040], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([lsp], [echo a | nc -u 88.88.88.89 4040], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([lsp], [echo a | nc -u 88.88.88.90 2021], [ignore], [ignore], [ignore])
 
 # Check hairpin traffic.
 OVS_WAIT_UNTIL([
@@ -4949,9 +4949,9 @@ NS_CHECK_EXEC([lsp], [tcpdump -l -nn -c 3 -i lsp $filter > lsp.pcap 2>tcpdump_er
 OVS_WAIT_UNTIL([grep "listening" tcpdump_err])
 
 # Generate IPv6 UDP hairpin traffic.
-NS_CHECK_EXEC([lsp], [echo a | nc -u 8800::0088 4040 &], [0])
-NS_CHECK_EXEC([lsp], [echo a | nc -u 8800::0089 4040 &], [0])
-NS_CHECK_EXEC([lsp], [echo a | nc -u 8800::0090 2021 &], [0])
+NS_CHECK_EXEC([lsp], [echo a | nc -u 8800::0088 4040], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([lsp], [echo a | nc -u 8800::0089 4040], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([lsp], [echo a | nc -u 8800::0090 2021], [ignore], [ignore], [ignore])
 
 # Check hairpin traffic.
 OVS_WAIT_UNTIL([
@@ -6131,10 +6131,10 @@ tcp,orig=(src=172.16.0.1,dst=10.0.0.2,sport=<cleared>,dport=<cleared>),reply=(sr
 # Ensure datapaths show conntrack states as expected
 # Like with conntrack entries, we shouldn't try to predict
 # port binding tunnel keys. So omit them from expected labels.
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(+new-est-rpl+trk).*ct(.*label=0x401020400000000/.*)' -c], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(+new-est-rpl-inv+trk).*ct(.*label=0x401020400000000/.*)' -c], [0], [dnl
 1
 ])
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(-new+est+rpl+trk).*ct_label(0x401020400000000)' -c], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(-new+est+rpl-inv+trk).*ct_label(0x401020400000000)' -c], [0], [dnl
 1
 ])
 
@@ -6149,10 +6149,10 @@ ovn-nbctl set Logical_Switch_Port r2-ext \
 ovn-nbctl --wait=hv sync
 
 NS_CHECK_EXEC([bob1], [nc -z 10.0.0.2 80], [0])
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(+new-est-rpl+trk).*ct(.*label=0x1001020400000000/.*)' -c], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(+new-est-rpl-inv+trk).*ct(.*label=0x1001020400000000/.*)' -c], [0], [dnl
 1
 ])
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(-new+est+rpl+trk).*ct_label(0x1001020400000000)' -c], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(-new+est+rpl-inv+trk).*ct_label(0x1001020400000000)' -c], [0], [dnl
 1
 ])
 
@@ -6316,11 +6316,11 @@ NS_CHECK_EXEC([bob1], [nc -6 -z fd01::2 80], [0])
 # Ensure datapaths show conntrack states as expected
 # Like with conntrack entries, we shouldn't try to predict
 # port binding tunnel keys. So omit them from expected labels.
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(+new-est-rpl+trk).*ct(.*label=0x401020400000000/.*)' -c], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(+new-est-rpl-inv+trk).*ct(.*label=0x401020400000000/.*)' -c], [0], [dnl
 1
 ])
 
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(-new+est+rpl+trk).*ct_label(0x401020400000000)' -c], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(-new+est+rpl-inv+trk).*ct_label(0x401020400000000)' -c], [0], [dnl
 1
 ])
 
@@ -6343,10 +6343,10 @@ ovn-nbctl set Logical_Switch_Port r2-ext \
 
 NS_CHECK_EXEC([bob1], [nc -6 -z fd01::2 80], [0])
 
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(+new-est-rpl+trk).*ct(.*label=0x1001020400000000/.*)' -c], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(+new-est-rpl-inv+trk).*ct(.*label=0x1001020400000000/.*)' -c], [0], [dnl
 1
 ])
-AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(-new+est+rpl+trk).*ct_label(0x1001020400000000)' -c], [0], [dnl
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep 'ct_state(-new+est+rpl-inv+trk).*ct_label(0x1001020400000000)' -c], [0], [dnl
 1
 ])
 
@@ -9045,7 +9045,7 @@ start_daemon ovn-controller
 #         |
 # VM2 ----+
 #
-# Two templated load balancer applied on LS1 and GW-Router with
+# Four templated load balancer applied on LS1 and GW-Router with
 # VM1 as backend.  The VIPs should be accessible from both VM2 and VM3.
 
 check ovn-nbctl                                                   \
@@ -9073,7 +9073,7 @@ check ovn-nbctl                                                   \
 # VIP=66.66.66.66:777 backends=42.42.42.2:4343 proto=udp
 
 AT_CHECK([ovn-nbctl -- create chassis_template_var chassis="hv1" \
-    variables="{vip=66.66.66.66,vport1=666,backends1=\"42.42.42.2:4242\",vport2=777,backends2=\"42.42.42.2:4343\"}"],
+    variables="{vip=66.66.66.66,vport1=666,backends1=\"42.42.42.2:4242\",vport2=777,backends2=\"42.42.42.2:4343\",vport3=888,vport4=999}"],
          [0], [ignore])
 
 check ovn-nbctl --template lb-add lb-test-tcp "^vip:^vport1" "^backends1" tcp \
@@ -9083,6 +9083,18 @@ check ovn-nbctl --template lb-add lb-test-tcp "^vip:^vport1" "^backends1" tcp \
 check ovn-nbctl --template lb-add lb-test-udp "^vip:^vport2" "^backends2" udp \
     -- ls-lb-add ls1 lb-test-udp                                              \
     -- lr-lb-add rtr lb-test-udp
+
+# Add a TCP template LB with explicit backends that eventually expands to:
+# VIP=66.66.66.66:888 backends=42.42.42.2:4242 proto=tcp
+# And a UDP template LB that eventually expands to:
+# VIP=66.66.66.66:999 backends=42.42.42.2:4343 proto=udp
+check ovn-nbctl --template lb-add lb-test-tcp2 "^vip:^vport3" "42.42.42.2:4242" tcp ipv4 \
+    -- ls-lb-add ls1 lb-test-tcp2                                                        \
+    -- lr-lb-add rtr lb-test-tcp2
+
+check ovn-nbctl --template lb-add lb-test-udp2 "^vip:^vport4" "42.42.42.2:4343" udp ipv4 \
+    -- ls-lb-add ls1 lb-test-udp2                                                        \
+    -- lr-lb-add rtr lb-test-udp2
 
 ADD_NAMESPACES(vm1)
 ADD_VETH(vm1, vm1, br-int, "42.42.42.2/24", "00:00:00:00:00:01", "42.42.42.1")
@@ -9104,13 +9116,15 @@ name: 'backends2' value: '42.42.42.2:4343'
 name: 'vip' value: '66.66.66.66'
 name: 'vport1' value: '666'
 name: 'vport2' value: '777'
+name: 'vport3' value: '888'
+name: 'vport4' value: '999'
 ])
 
 # Start IPv4 TCP server on vm1.
 NETNS_DAEMONIZE([vm1], [nc -k -l 42.42.42.2 4242], [nc-vm1.pid])
 
 NETNS_DAEMONIZE([vm1],
-    [tcpdump -n -i vm1 -nnleX -c3 udp and dst 42.42.42.2 and dst port 4343 > vm1.pcap 2>/dev/null],
+    [tcpdump -n -i vm1 -nnleX -c6 udp and dst 42.42.42.2 and dst port 4343 > vm1.pcap 2>/dev/null],
     [tcpdump1.pid])
 
 # Make sure connecting to the VIP works (hairpin, via ls and via lr).
@@ -9118,13 +9132,21 @@ NS_CHECK_EXEC([vm1], [nc 66.66.66.66 666 -z], [0], [ignore], [ignore])
 NS_CHECK_EXEC([vm2], [nc 66.66.66.66 666 -z], [0], [ignore], [ignore])
 NS_CHECK_EXEC([vm3], [nc 66.66.66.66 666 -z], [0], [ignore], [ignore])
 
-NS_CHECK_EXEC([vm1], [echo a | nc -u 66.66.66.66 777 &], [0])
-NS_CHECK_EXEC([vm2], [echo a | nc -u 66.66.66.66 777 &], [0])
-NS_CHECK_EXEC([vm3], [echo a | nc -u 66.66.66.66 777 &], [0])
+NS_CHECK_EXEC([vm1], [echo a | nc -u 66.66.66.66 777], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([vm2], [echo a | nc -u 66.66.66.66 777], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([vm3], [echo a | nc -u 66.66.66.66 777], [ignore], [ignore], [ignore])
+
+NS_CHECK_EXEC([vm1], [nc 66.66.66.66 888 -z], [0], [ignore], [ignore])
+NS_CHECK_EXEC([vm2], [nc 66.66.66.66 888 -z], [0], [ignore], [ignore])
+NS_CHECK_EXEC([vm3], [nc 66.66.66.66 888 -z], [0], [ignore], [ignore])
+
+NS_CHECK_EXEC([vm1], [echo a | nc -u 66.66.66.66 999], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([vm2], [echo a | nc -u 66.66.66.66 999], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([vm3], [echo a | nc -u 66.66.66.66 999], [ignore], [ignore], [ignore])
 
 OVS_WAIT_UNTIL([
     requests=`grep "UDP" -c vm1.pcap`
-    test "${requests}" -ge "3"
+    test "${requests}" -ge "6"
 ])
 
 AT_CLEANUP
@@ -9159,7 +9181,7 @@ start_daemon ovn-controller
 #         |
 # VM2 ----+
 #
-# Two templated load balancer applied on LS1 and GW-Router with
+# Four templated load balancer applied on LS1 and GW-Router with
 # VM1 as backend.  The VIPs should be accessible from both VM2 and VM3.
 
 check ovn-nbctl                                                   \
@@ -9187,7 +9209,7 @@ check ovn-nbctl                                                   \
 # VIP=[6666::1]:777 backends=[4242::2]:4343 proto=udp
 
 AT_CHECK([ovn-nbctl -- create chassis_template_var chassis="hv1" \
-    variables="{vip=\"6666::1\",vport1=666,backends1=\"[[4242::2]]:4242\",vport2=777,backends2=\"[[4242::2]]:4343\"}"],
+    variables="{vip=\"6666::1\",vport1=666,backends1=\"[[4242::2]]:4242\",vport2=777,backends2=\"[[4242::2]]:4343\",vport3=888,vport4=999}"],
          [0], [ignore])
 
 check ovn-nbctl --template lb-add lb-test-tcp "^vip:^vport1" "^backends1" tcp ipv6 \
@@ -9197,6 +9219,18 @@ check ovn-nbctl --template lb-add lb-test-tcp "^vip:^vport1" "^backends1" tcp ip
 check ovn-nbctl --template lb-add lb-test-udp "^vip:^vport2" "^backends2" udp ipv6 \
     -- ls-lb-add ls1 lb-test-udp                                                   \
     -- lr-lb-add rtr lb-test-udp
+
+# Add a TCP template LB with explicit backends that eventually expands to:
+# VIP=[6666::1]:888 backends=[4242::2]:4242 proto=tcp
+# And a UDP template LB that eventually expands to:
+# VIP=[6666::1]:999 backends=[4242::2]:4343 proto=udp
+check ovn-nbctl --template lb-add lb-test-tcp2 "^vip:^vport3" "[[4242::2]]:4242" tcp ipv6 \
+    -- ls-lb-add ls1 lb-test-tcp2                                                         \
+    -- lr-lb-add rtr lb-test-tcp2
+
+check ovn-nbctl --template lb-add lb-test-udp2 "^vip:^vport4" "[[4242::2]]:4343" udp ipv6 \
+    -- ls-lb-add ls1 lb-test-udp2                                                         \
+    -- lr-lb-add rtr lb-test-udp2
 
 ADD_NAMESPACES(vm1)
 ADD_VETH(vm1, vm1, br-int, "4242::2/64", "00:00:00:00:00:01", "4242::1")
@@ -9221,13 +9255,15 @@ name: 'backends2' value: '[[4242::2]]:4343'
 name: 'vip' value: '6666::1'
 name: 'vport1' value: '666'
 name: 'vport2' value: '777'
+name: 'vport3' value: '888'
+name: 'vport4' value: '999'
 ])
 
 # Start IPv6 TCP server on vm1.
 NETNS_DAEMONIZE([vm1], [nc -k -l 4242::2 4242], [nc-vm1.pid])
 
 NETNS_DAEMONIZE([vm1],
-    [tcpdump -n -i vm1 -nnleX -c3 udp and dst 4242::2 and dst port 4343 > vm1.pcap 2>/dev/null],
+    [tcpdump -n -i vm1 -nnleX -c6 udp and dst 4242::2 and dst port 4343 > vm1.pcap 2>/dev/null],
     [tcpdump1.pid])
 
 # Make sure connecting to the VIP works (hairpin, via ls and via lr).
@@ -9235,13 +9271,21 @@ NS_CHECK_EXEC([vm1], [nc 6666::1 666 -z], [0], [ignore], [ignore])
 NS_CHECK_EXEC([vm2], [nc 6666::1 666 -z], [0], [ignore], [ignore])
 NS_CHECK_EXEC([vm3], [nc 6666::1 666 -z], [0], [ignore], [ignore])
 
-NS_CHECK_EXEC([vm1], [echo a | nc -u 6666::1 777 &], [0])
-NS_CHECK_EXEC([vm2], [echo a | nc -u 6666::1 777 &], [0])
-NS_CHECK_EXEC([vm3], [echo a | nc -u 6666::1 777 &], [0])
+NS_CHECK_EXEC([vm1], [echo a | nc -u 6666::1 777], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([vm2], [echo a | nc -u 6666::1 777], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([vm3], [echo a | nc -u 6666::1 777], [ignore], [ignore], [ignore])
+
+NS_CHECK_EXEC([vm1], [nc 6666::1 888 -z], [0], [ignore], [ignore])
+NS_CHECK_EXEC([vm2], [nc 6666::1 888 -z], [0], [ignore], [ignore])
+NS_CHECK_EXEC([vm3], [nc 6666::1 888 -z], [0], [ignore], [ignore])
+
+NS_CHECK_EXEC([vm1], [echo a | nc -u 6666::1 999], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([vm2], [echo a | nc -u 6666::1 999], [ignore], [ignore], [ignore])
+NS_CHECK_EXEC([vm3], [echo a | nc -u 6666::1 999], [ignore], [ignore], [ignore])
 
 OVS_WAIT_UNTIL([
     requests=`grep "UDP" -c vm1.pcap`
-    test "${requests}" -ge "3"
+    test "${requests}" -ge "6"
 ])
 
 AT_CLEANUP
@@ -9993,11 +10037,13 @@ check ovn-nbctl lsp-add bar bar3 \
 -- lsp-set-addresses bar3 "f0:00:0f:01:02:05 172.16.1.4"
 
 # Config OVN load-balancer with a VIP.
-check ovn-nbctl lb-add lb1 30.0.0.1 "172.16.1.2,172.16.1.3,172.16.1.4"
+check ovn-nbctl lb-add lb1 30.0.0.1 "172.16.1.2,172.16.1.3,172.16.1.4" \
+    -- set load_balancer lb1 options:ct_flush="true"
 check ovn-nbctl ls-lb-add foo lb1
 
 # Create another load-balancer with another VIP.
 lb2_uuid=`ovn-nbctl create load_balancer name=lb2 vips:30.0.0.3="172.16.1.2,172.16.1.3,172.16.1.4"`
+check ovn-nbctl set load_balancer lb2 options:ct_flush="true"
 check ovn-nbctl ls-lb-add foo lb2
 
 # Config OVN load-balancer with another VIP (this time with ports).
@@ -10013,15 +10059,17 @@ OVS_START_L7([bar1], [http])
 OVS_START_L7([bar2], [http])
 OVS_START_L7([bar3], [http])
 
-OVS_WAIT_FOR_OUTPUT([
-    for i in `seq 1 20`; do
-        ip netns exec foo1 wget 30.0.0.1 -t 5 -T 1 --retry-connrefused -v -o wget$i.log;
-    done
-    ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.1) | sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [dnl
+m4_define([LB1_CT_ENTRIES], [dnl
 tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.2,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
 tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.3,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
 tcp,orig=(src=192.168.1.2,dst=30.0.0.1,sport=<cleared>,dport=<cleared>),reply=(src=172.16.1.4,dst=192.168.1.2,sport=<cleared>,dport=<cleared>),zone=<cleared>,mark=2,protoinfo=(state=<cleared>)
 ])
+
+OVS_WAIT_FOR_OUTPUT([
+    for i in `seq 1 20`; do
+        ip netns exec foo1 wget 30.0.0.1 -t 5 -T 1 --retry-connrefused -v -o wget$i.log;
+    done
+    ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.1) | sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [LB1_CT_ENTRIES])
 
 OVS_WAIT_FOR_OUTPUT([
     for i in `seq 1 20`; do
@@ -10095,6 +10143,26 @@ tcp,orig=(src=192.168.1.2,dst=30.0.0.3,sport=<cleared>,dport=<cleared>),reply=(s
 check ovn-nbctl lb-del lb2
 
 OVS_WAIT_UNTIL([test "$(ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.3) | wc -l)" = "0"])
+
+# Check that LB has CT flush disabled by default
+check ovn-nbctl lb-add lb1 30.0.0.1 "172.16.1.2,172.16.1.3,172.16.1.4"
+check ovn-nbctl ls-lb-add foo lb1
+
+OVS_WAIT_FOR_OUTPUT([
+    for i in `seq 1 20`; do
+        ip netns exec foo1 wget 30.0.0.1 -t 5 -T 1 --retry-connrefused -v -o wget$i.log;
+    done
+    ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.1) | sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [LB1_CT_ENTRIES])
+
+# Remove one backend
+check ovn-nbctl --wait=hv set load_balancer lb1 vips='"30.0.0.1"="172.16.1.2,172.16.1.3"'
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.1) | sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [LB1_CT_ENTRIES])
+
+# Remove whole LB
+check ovn-nbctl --wait=hv lb-del lb1
+
+AT_CHECK([ovs-appctl dpctl/dump-conntrack | FORMAT_CT(30.0.0.1) | sed -e 's/zone=[[0-9]]*/zone=<cleared>/'], [0], [LB1_CT_ENTRIES])
 
 OVS_APP_EXIT_AND_WAIT([ovn-controller])
 
@@ -10431,6 +10499,8 @@ AT_SKIP_IF([test $HAVE_TCPDUMP = no])
 ovn_start
 OVS_TRAFFIC_VSWITCHD_START()
 ADD_BR([br-int])
+ADD_BR([br-ext])
+ovs-ofctl add-flow br-ext action=normal
 
 # Set external-ids in br-int needed for ovn-controller
 ovs-vsctl \
@@ -10447,7 +10517,9 @@ start_daemon ovn-controller
 # One LR - R1 and two LSs - foo and bar, R1 has switches foo (192.168.1.0/24) and
 # bar (192.168.2.0/24) connected to it
 #
-#    foo -- R1 -- bar
+#    br-ext -- localnet -- foo -- R1 -- bar
+
+check ovs-vsctl set open . external-ids:ovn-bridge-mappings=provider:br-ext
 
 check ovn-nbctl lr-add R1
 check ovn-nbctl ls-add foo
@@ -10456,12 +10528,13 @@ check ovn-nbctl ls-add bar
 # Connect foo to R1
 check ovn-nbctl lrp-add R1 foo 00:00:01:01:02:03 192.168.1.1/24
 check ovn-nbctl lsp-add foo rp-foo -- set Logical_Switch_Port rp-foo \
-    type=router options:arp_proxy="0a:58:a9:fe:01:01 169.254.239.254 169.254.239.2 169.254.238.0/24 " options:router-port=foo addresses='"router"'
+    type=router options:arp_proxy="0a:58:a9:fe:01:01 169.254.239.254 169.254.239.2 169.254.238.0/24 192.168.1.100" options:router-port=foo addresses='"router"'
 
 # Connect bar to R1
 check ovn-nbctl lrp-add R1 bar 00:00:01:01:02:04 192.168.2.1/24
 check ovn-nbctl lsp-add bar rp-bar -- set Logical_Switch_Port rp-bar \
     type=router options:arp_proxy="169.254.239.253" options:router-port=bar addresses='"router"'
+
 
 # Logical port 'foo1' in switch 'foo'.
 ADD_NAMESPACES(foo1)
@@ -10484,12 +10557,20 @@ ADD_VETH(foo3, foo3, br-int, "192.168.1.4/24", "f0:00:00:01:02:05", \
 check ovn-nbctl lsp-add foo foo3 \
 -- lsp-set-addresses foo3 "f0:00:00:01:02:05 192.168.1.4"
 
+# Logical port 'ext1' in switch 'foo'
+ADD_NAMESPACES(ext1)
+ADD_VETH(ext1, ext1, br-ext, "192.168.1.5/24", "f0:00:00:01:02:06", \
+         "192.168.1.100",)
+check ovn-nbctl lsp-add foo ln -- lsp-set-options ln network_name=provider
+check ovn-nbctl lsp-set-type ln localnet
+check ovn-nbctl lsp-set-addresses ln unknown
+
 # Logical port 'bar1' in switch 'bar'.
 ADD_NAMESPACES(bar1)
-ADD_VETH(bar1, bar1, br-int, "192.168.2.2/24", "f0:00:00:01:02:06", \
+ADD_VETH(bar1, bar1, br-int, "192.168.2.2/24", "f0:00:00:01:02:07", \
 "169.254.239.253")
 check ovn-nbctl lsp-add bar bar1 \
--- lsp-set-addresses bar1 "f0:00:00:01:02:06 192.168.2.2"
+-- lsp-set-addresses bar1 "f0:00:00:01:02:07 192.168.2.2"
 
 # wait for ovn-controller to catch up.
 check ovn-nbctl --wait=hv sync
@@ -10530,6 +10611,19 @@ NS_CHECK_EXEC([foo3], [ping -q -c 3 -i 0.3 -w 2 192.168.2.2 | FORMAT_PING], \
 ])
 OVS_WAIT_UNTIL([
     total_pkts=$(cat foo3-icmp.pcap| wc -l)
+    test "${total_pkts}" = "3"
+])
+
+NETNS_DAEMONIZE([ext1], [tcpdump -l -nn -e -i ext1 'ether dst 0a:58:a9:fe:01:01 and icmp' > ext1-icmp.pcap 2>ext1-tcpdump.stderr], [ext1-icmp-tcpdump.pid])
+OVS_WAIT_UNTIL([grep "listening" ext1-tcpdump.stderr])
+
+# 'ext1' should be able to ping 'bar1'
+NS_CHECK_EXEC([ext1], [ping -q -c 3 -i 0.3 -w 2 192.168.2.2 | FORMAT_PING], \
+[0], [dnl
+3 packets transmitted, 3 received, 0% packet loss, time 0ms
+])
+OVS_WAIT_UNTIL([
+    total_pkts=$(cat ext1-icmp.pcap| wc -l)
     test "${total_pkts}" = "3"
 ])
 

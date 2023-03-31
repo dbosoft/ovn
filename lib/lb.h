@@ -96,6 +96,9 @@ struct ovn_lb_vip {
                           */
     struct ovn_lb_backend *backends;
     size_t n_backends;
+    bool template_backends; /* True if the backends are templates. False if
+                             * they're explicitly specified.
+                             */
     bool empty_backend_rej;
     int address_family;
 };
@@ -130,7 +133,8 @@ struct ovn_northd_lb_backend {
 };
 
 struct ovn_northd_lb *ovn_northd_lb_create(const struct nbrec_load_balancer *,
-                                           size_t n_datapaths);
+                                           size_t n_ls_datapaths,
+                                           size_t n_lr_datapaths);
 struct ovn_northd_lb *ovn_northd_lb_find(const struct hmap *,
                                          const struct uuid *);
 const struct smap *ovn_northd_lb_get_vips(const struct ovn_northd_lb *);
@@ -157,7 +161,8 @@ struct ovn_lb_group {
 struct ovn_lb_group *ovn_lb_group_create(
     const struct nbrec_load_balancer_group *,
     const struct hmap *lbs,
-    size_t max_datapaths);
+    size_t max_ls_datapaths,
+    size_t max_lr_datapaths);
 void ovn_lb_group_destroy(struct ovn_lb_group *lb_group);
 struct ovn_lb_group *ovn_lb_group_find(const struct hmap *lb_groups,
                                        const struct uuid *);
@@ -188,6 +193,7 @@ struct ovn_controller_lb {
     bool hairpin_orig_tuple; /* True if ovn-northd stores the original
                               * destination tuple in registers.
                               */
+    bool ct_flush; /* True if we should flush CT after backend removal. */
 
     struct lport_addresses hairpin_snat_ips; /* IP (v4 and/or v6) to be used
                                               * as source for hairpinned
@@ -210,8 +216,7 @@ char *ovn_lb_vip_init(struct ovn_lb_vip *lb_vip, const char *lb_key,
 void ovn_lb_vip_destroy(struct ovn_lb_vip *vip);
 void ovn_lb_vip_format(const struct ovn_lb_vip *vip, struct ds *s,
                        bool template);
-void ovn_lb_vip_backends_format(const struct ovn_lb_vip *vip, struct ds *s,
-                                bool template);
+void ovn_lb_vip_backends_format(const struct ovn_lb_vip *vip, struct ds *s);
 
 struct ovn_lb_5tuple {
     struct hmap_node hmap_node;

@@ -38,6 +38,7 @@ static const char *lb_neighbor_responder_mode_names[] = {
 static struct nbrec_load_balancer_health_check *
 ovn_lb_get_health_check(const struct nbrec_load_balancer *nbrec_lb,
                         const char *vip_port_str, bool template);
+static void ovn_lb_backends_clear(struct ovn_lb_vip *vip);
 
 struct ovn_lb_ip_set *
 ovn_lb_ip_set_create(void)
@@ -238,6 +239,8 @@ ovn_lb_backends_init_template(struct ovn_lb_vip *lb_vip, const char *value_)
             ds_put_format(&errors, "%s: should be a template of the form: "
                           "'^backendip_variable1[:^port_variable1|:port]', ",
                           atom);
+            free(backend_port);
+            free(backend_ip);
         }
         free(atom);
     }
@@ -285,8 +288,27 @@ ovn_lb_vip_init_template(struct ovn_lb_vip *lb_vip, const char *lb_key_,
                          lb_key_);
     }
 
+    /* Backends can either be templates or explicit IPs and ports. */
     lb_vip->address_family = address_family;
-    return ovn_lb_backends_init_template(lb_vip, lb_value);
+    lb_vip->template_backends = true;
+    char *template_error = ovn_lb_backends_init_template(lb_vip, lb_value);
+
+    if (template_error) {
+        lb_vip->template_backends = false;
+        ovn_lb_backends_clear(lb_vip);
+
+        char *explicit_error = ovn_lb_backends_init_explicit(lb_vip, lb_value);
+        if (explicit_error) {
+            char *error =
+                xasprintf("invalid backend: template (%s) OR explicit (%s)",
+                          template_error, explicit_error);
+            free(explicit_error);
+            free(template_error);
+            return error;
+        }
+        free(template_error);
+    }
+    return NULL;
 }
 
 /* Returns NULL on success, an error string on failure.  The caller is
@@ -304,15 +326,29 @@ ovn_lb_vip_init(struct ovn_lb_vip *lb_vip, const char *lb_key,
                                        address_family);
 }
 
+static void
+ovn_lb_backends_destroy(struct ovn_lb_vip *vip)
+{
+    for (size_t i = 0; i < vip->n_backends; i++) {
+        free(vip->backends[i].ip_str);
+        free(vip->backends[i].port_str);
+    }
+}
+
+static void
+ovn_lb_backends_clear(struct ovn_lb_vip *vip)
+{
+    ovn_lb_backends_destroy(vip);
+    vip->backends = NULL;
+    vip->n_backends = 0;
+}
+
 void
 ovn_lb_vip_destroy(struct ovn_lb_vip *vip)
 {
     free(vip->vip_str);
     free(vip->port_str);
-    for (size_t i = 0; i < vip->n_backends; i++) {
-        free(vip->backends[i].ip_str);
-        free(vip->backends[i].port_str);
-    }
+    ovn_lb_backends_destroy(vip);
     free(vip->backends);
 }
 
@@ -357,11 +393,10 @@ ovn_lb_vip_format(const struct ovn_lb_vip *vip, struct ds *s, bool template)
 }
 
 void
-ovn_lb_vip_backends_format(const struct ovn_lb_vip *vip, struct ds *s,
-                           bool template)
+ovn_lb_vip_backends_format(const struct ovn_lb_vip *vip, struct ds *s)
 {
     bool needs_brackets = vip->address_family == AF_INET6 && vip->port_str
-                          && !template;
+                          && !vip->template_backends;
     for (size_t i = 0; i < vip->n_backends; i++) {
         struct ovn_lb_backend *backend = &vip->backends[i];
 
@@ -521,7 +556,7 @@ ovn_lb_get_health_check(const struct nbrec_load_balancer *nbrec_lb,
 
 struct ovn_northd_lb *
 ovn_northd_lb_create(const struct nbrec_load_balancer *nbrec_lb,
-                     size_t n_datapaths)
+                     size_t n_ls_datapaths, size_t n_lr_datapaths)
 {
     bool template = smap_get_bool(&nbrec_lb->options, "template", false);
     bool is_udp = nullable_string_is_equal(nbrec_lb->protocol, "udp");
@@ -560,8 +595,8 @@ ovn_northd_lb_create(const struct nbrec_load_balancer *nbrec_lb,
     }
     lb->affinity_timeout = affinity_timeout;
 
-    lb->nb_ls_map = bitmap_allocate(n_datapaths);
-    lb->nb_lr_map = bitmap_allocate(n_datapaths);
+    lb->nb_ls_map = bitmap_allocate(n_ls_datapaths);
+    lb->nb_lr_map = bitmap_allocate(n_lr_datapaths);
 
     sset_init(&lb->ips_v4);
     sset_init(&lb->ips_v6);
@@ -687,12 +722,13 @@ ovn_northd_lb_destroy(struct ovn_northd_lb *lb)
 
 /* Constructs a new 'struct ovn_lb_group' object from the Nb LB Group record
  * and a hash map of all existing 'struct ovn_northd_lb' objects.  Space will
- * be allocated for 'max_datapaths' logical switches and the same amount of
+ * be allocated for 'max_ls_datapaths' logical switches and 'max_lr_datapaths'
  * logical routers to which this LB Group is applied.  Can be filled later
  * with ovn_lb_group_add_ls() and ovn_lb_group_add_lr() respectively. */
 struct ovn_lb_group *
 ovn_lb_group_create(const struct nbrec_load_balancer_group *nbrec_lb_group,
-                    const struct hmap *lbs, size_t max_datapaths)
+                    const struct hmap *lbs, size_t max_ls_datapaths,
+                    size_t max_lr_datapaths)
 {
     struct ovn_lb_group *lb_group;
 
@@ -700,8 +736,8 @@ ovn_lb_group_create(const struct nbrec_load_balancer_group *nbrec_lb_group,
     lb_group->uuid = nbrec_lb_group->header_.uuid;
     lb_group->n_lbs = nbrec_lb_group->n_load_balancer;
     lb_group->lbs = xmalloc(lb_group->n_lbs * sizeof *lb_group->lbs);
-    lb_group->ls = xmalloc(max_datapaths * sizeof *lb_group->ls);
-    lb_group->lr = xmalloc(max_datapaths * sizeof *lb_group->lr);
+    lb_group->ls = xmalloc(max_ls_datapaths * sizeof *lb_group->ls);
+    lb_group->lr = xmalloc(max_lr_datapaths * sizeof *lb_group->lr);
     lb_group->lb_ips = ovn_lb_ip_set_create();
 
     for (size_t i = 0; i < nbrec_lb_group->n_load_balancer; i++) {
@@ -798,6 +834,7 @@ ovn_controller_lb_create(const struct sbrec_load_balancer *sbrec_lb,
     lb->hairpin_orig_tuple = smap_get_bool(&sbrec_lb->options,
                                            "hairpin_orig_tuple",
                                            false);
+    lb->ct_flush = smap_get_bool(&sbrec_lb->options, "ct_flush", false);
     ovn_lb_get_hairpin_snat_ip(&sbrec_lb->header_.uuid, &sbrec_lb->options,
                                &lb->hairpin_snat_ips);
     return lb;
