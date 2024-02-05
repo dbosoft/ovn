@@ -288,7 +288,7 @@ maintain_interface_smap_column(
     }
 }
 
-
+uint16_t
 get_iface_mtu(const struct ovsrec_interface *iface)
 {
     if (!iface || !iface->n_mtu || iface->mtu[0] <= 0) {
@@ -301,4 +301,4 @@ get_iface_mtu(const struct ovsrec_interface *iface)
 #ifdef _WIN32    
     #pragma pop_macro("interface")
 #endif
-uint16_t
+
