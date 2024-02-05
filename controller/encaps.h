@@ -35,15 +35,21 @@ void encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
                 const struct sbrec_chassis *,
                 const struct sbrec_sb_global *,
                 const struct ovsrec_open_vswitch_table *,
-                const struct sset *transport_zones);
+                const struct sset *transport_zones,
+                const struct ovsrec_bridge_table *bridge_table);
 
 bool encaps_cleanup(struct ovsdb_idl_txn *ovs_idl_txn,
                     const struct ovsrec_bridge *br_int);
 
-char *encaps_tunnel_id_create(const char *chassis_id, const char *encap_ip);
+char *encaps_tunnel_id_create(const char *chassis_id,
+                              const char *remote_encap_ip,
+                              const char *local_encap_ip);
 bool  encaps_tunnel_id_parse(const char *tunnel_id, char **chassis_id,
-                             char **encap_ip);
+                             char **remote_encap_ip, char **local_encap_ip);
 bool  encaps_tunnel_id_match(const char *tunnel_id, const char *chassis_id,
-                             const char *encap_ip);
+                             const char *remote_encap_ip,
+                             const char *local_encap_ip);
+
+void encaps_destroy(void);
 
 #endif /* controller/encaps.h */

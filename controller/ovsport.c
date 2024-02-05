@@ -223,6 +223,22 @@ ovsrec_port * ovsport_lookup_by_interface(
                                         interfaces, 1);
 }
 
+const struct ovsrec_port *
+ovsport_lookup_by_qos(struct ovsdb_idl_index *ovsrec_port_by_qos,
+                      const struct ovsrec_qos *qos)
+{
+    const struct ovsrec_port *port =
+        ovsrec_port_index_init_row(ovsrec_port_by_qos);
+    ovsrec_port_index_set_qos(port, qos);
+
+    const struct ovsrec_port *retval =
+        ovsrec_port_index_find(ovsrec_port_by_qos, port);
+
+    ovsrec_port_index_destroy_row(port);
+
+    return retval;
+}
+
 /* Update an interface map column with the key/value pairs present in the
  * provided smap, only applying changes when necessary. */
 static void
@@ -273,7 +289,16 @@ maintain_interface_smap_column(
 }
 
 
+get_iface_mtu(const struct ovsrec_interface *iface)
+{
+    if (!iface || !iface->n_mtu || iface->mtu[0] <= 0) {
+        return 0;
+    }
+    return (uint16_t) iface->mtu[0];
+}
+
 /* restore macro interface from Windows headers*/
 #ifdef _WIN32    
     #pragma pop_macro("interface")
 #endif
+uint16_t

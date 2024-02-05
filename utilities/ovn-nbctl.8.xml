@@ -399,7 +399,7 @@
       must be either <code>switch</code> or <code>port-group</code>.
     </p>
     <dl>
-      <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] [<code>--log</code>] [<code>--meter=</code><var>meter</var>] [<code>--severity=</code><var>severity</var>] [<code>--name=</code><var>name</var>] [<code>--label=</code><var>label</var>] [<code>--may-exist</code>] [<code>--apply-after-lb</code>] <code>acl-add</code> <var>entity</var> <var>direction</var> <var>priority</var> <var>match</var> <var>verdict</var></dt>
+        <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] [<code>--log</code>] [<code>--meter=</code><var>meter</var>] [<code>--severity=</code><var>severity</var>] [<code>--name=</code><var>name</var>] [<code>--label=</code><var>label</var>] [<code>--may-exist</code>] [<code>--apply-after-lb</code>] [<code>--tier</code>] <code>acl-add</code> <var>entity</var> <var>direction</var> <var>priority</var> <var>match</var> <var>verdict</var></dt>
       <dd>
         <p>
           Adds the specified ACL to <var>entity</var>.  <var>direction</var>
@@ -430,16 +430,29 @@
           of the <code>ACL</code> table.  As the option name suggests, the ACL
           will be applied after the logical switch load balancer stage.
         </p>
+        <p>
+          The <code>--tier</code> option sets the ACL's tier to the specified
+          value. For more information about ACL tiers, see the documentation
+          for the <code>ovn-nb</code>(5) database.
+        </p>
       </dd>
 
-      <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] <code>acl-del</code> <var>entity</var> [<var>direction</var> [<var>priority</var> <var>match</var>]]</dt>
+      <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] [<code>--tier</code>] <code>acl-del</code> <var>entity</var> [<var>direction</var> [<var>priority</var> <var>match</var>]]</dt>
       <dd>
-        Deletes ACLs from <var>entity</var>.  If only <var>entity</var> is
-        supplied, all the ACLs from the <var>entity</var> are deleted.  If
-        <var>direction</var> is also specified, then all the flows in that
-        direction will be deleted from the <var>entity</var>.  If all the
-        fields are given, then a single flow that matches all the fields will
-        be deleted.
+        <p>
+          Deletes ACLs from <var>entity</var>.  If only <var>entity</var> is
+          supplied, all the ACLs from the <var>entity</var> are deleted.  If
+          <var>direction</var> is also specified, then all the flows in that
+          direction will be deleted from the <var>entity</var>.  If all the
+          fields are given, then a single flow that matches all the fields will
+          be deleted.
+        </p>
+
+        <p>
+          If the <code>--tier</code> option is provided, then only ACLs of the
+          given tier value will be deleted, in addition to whatever other
+          criteria have been provided.
+        </p>
       </dd>
 
       <dt>[<code>--type=</code>{<code>switch</code> | <code>port-group</code>}] <code>acl-list</code> <var>entity</var> </dt>
@@ -450,7 +463,7 @@
 
     <h2>Logical Switch QoS Rule Commands</h2>
     <dl>
-      <dt>[<code>--may-exist</code>] <code>qos-add</code> <var>switch</var> <var>direction</var> <var>priority</var> <var>match</var> [<code>dscp=</code><var>dscp</var>] [<code>rate=</code><var>rate</var> [<code>burst=</code><var>burst</var>]]</dt>
+        <dt>[<code>--may-exist</code>] <code>qos-add</code> <var>switch</var> <var>direction</var> <var>priority</var> <var>match</var> [<code>mark=</code><var>mark</var>] [<code>dscp=</code><var>dscp</var>] [<code>rate=</code><var>rate</var> [<code>burst=</code><var>burst</var>]]</dt>
       <dd>
         <p>
           Adds QoS marking and metering rules to <var>switch</var>.
@@ -469,6 +482,9 @@
           <code>burst=</code><var>burst</var> specifies the burst rate
           limit in kilobits.  <code>dscp</code> and/or <code>rate</code>
           are required arguments.
+          If <code>mark=</code><var>mark</var> is specified, then matching
+          packets will be marked (through <code>pkt.mark</code>).
+          <var>mark</var> must be a positive integer.
         </p>
 
         <p>
@@ -1106,6 +1122,14 @@
           duplicated routing policy results in error.
         </p>
 
+        <p>
+          <code>--bfd</code> option is used to link a BFD session to the
+          OVN reroute policy. OVN will look for an already running BFD
+          session using next-hop as lookup key in the BFD table.
+          If the lookup fails, a new entry in the BFD table will be created
+          using the <var>nexthop</var> as <var>dst_ip</var>.
+        </p>
+
           <p>
           The following example shows a policy to lr1, which will drop packets
           from<code>192.168.100.0/24</code>.
@@ -1453,10 +1477,12 @@
         <code>group</code> does not exist.
       </dd>
 
-      <dt><code>ha-chassis-group-list</code></dt>
+      <dt><code>ha-chassis-group-list</code> [<var>ha-chassis-group</var>]</dt>
       <dd>
-        Lists the HA chassis group <code>group</code> along with the
-        <code>HA chassis</code> if any associated with it.
+        Lists all HA chassis groups along with the <code>HA chassis</code>
+        if any associated with it.
+        If <var>ha-chassis-group</var> is also specified, then only the
+        specified <var>ha-chassis-group</var> will be listed.
       </dd>
 
       <dt><code>ha-chassis-group-add-chassis</code> <var>group</var>
@@ -1546,7 +1572,7 @@
     <h2> Mirror commands</h2>
     <dl>
       <dt><code>mirror-add</code> <var>m</var> <var>type</var>
-      <var>index</var> <var>filter</var> <var>dest</var></dt>
+      [<var>index</var>] <var>filter</var> <var>dest</var></dt>
       <dd>
         <p>
           Creates a new mirror in the <code>Mirror</code>
@@ -1556,21 +1582,28 @@
 
         <p>
           <var>type</var> specifies the mirror type - <code>gre</code>
-          or <code>erspan</code>.
+          , <code>erspan</code> or <code>local</code>.
         </p>
 
         <p>
           <var>index</var> specifies the tunnel index value (which is
-          an integer).
+          an integer) if the <var>type</var> is <code>gre</code> or
+          <code>erspan</code>.
         </p>
 
         <p>
           <var>filter</var> specifies the mirror source selection.
-          Can be <code>from-lport</code> or <code>to-lport</code>.
+          Can be <code>from-lport</code>, <code>to-lport</code> or
+          <code>both</code>.
         </p>
 
         <p>
-          <var>dest</var> specifies the mirror destination IP (v4 or v6).
+          <var>dest</var> specifies the mirror destination IP (v4 or v6)
+          if the <var>type</var> is <code>gre</code> or <code>erspan</code>.
+          For a <var>type</var> of <code>local</code>, this field defines a
+          local interface on the OVS integration bridge to be used as the
+          mirror destination. The interface must possess external-ids:mirror-id
+          that matches this string.
         </p>
       </dd>
 

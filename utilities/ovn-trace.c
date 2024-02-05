@@ -127,7 +127,7 @@ main(int argc, char *argv[])
     struct unixctl_server *server = NULL;
     bool exiting = false;
     if (get_detach()) {
-        daemonize_start(false);
+        daemonize_start(false, false);
 
         char *abs_unixctl_path = get_abs_unix_ctl_path(unixctl_path);
         int error = unixctl_server_create(abs_unixctl_path, &server);
@@ -983,6 +983,7 @@ parse_lflow_for_datapath(const struct sbrec_logical_flow *sblf,
         if (error) {
             VLOG_WARN("%s: parsing expression failed (%s)",
                       sblf->match, error);
+            expr_destroy(match);
             free(error);
             return;
         }
@@ -1125,10 +1126,7 @@ read_mac_bindings(void)
         }
 
         struct in6_addr ip6;
-        ovs_be32 ip4;
-        if (ip_parse(sbmb->ip, &ip4)) {
-            ip6 = in6_addr_mapped_ipv4(ip4);
-        } else if (!ipv6_parse(sbmb->ip, &ip6)) {
+        if (!ip46_parse(sbmb->ip, &ip6)) {
             VLOG_WARN("%s: bad IP address", sbmb->ip);
             continue;
         }
@@ -3355,6 +3353,8 @@ trace_actions(const struct ovnact *ovnacts, size_t ovnacts_len,
         case OVNACT_CHK_LB_AFF:
             break;
         case OVNACT_SAMPLE:
+            break;
+        case OVNACT_MAC_CACHE_USE:
             break;
         }
     }

@@ -33,6 +33,7 @@
 #include "lib/ovn-l7.h"
 #include "lib/ovn-nb-idl.h"
 #include "lib/ovn-sb-idl.h"
+#include "lib/ovs-rcu.h"
 #include "openvswitch/poll-loop.h"
 #include "simap.h"
 #include "stopwatch.h"
@@ -46,7 +47,6 @@
 
 VLOG_DEFINE_THIS_MODULE(ovn_northd);
 
-static unixctl_cb_func ovn_northd_exit;
 static unixctl_cb_func ovn_northd_pause;
 static unixctl_cb_func ovn_northd_resume;
 static unixctl_cb_func ovn_northd_is_paused;
@@ -96,7 +96,7 @@ static const char *rbac_controller_event_update[] =
 static const char *rbac_fdb_auth[] =
     {""};
 static const char *rbac_fdb_update[] =
-    {"dp_key", "mac", "port_key"};
+    {"dp_key", "mac", "port_key", "timestamp"};
 
 static const char *rbac_port_binding_auth[] =
     {""};
@@ -114,15 +114,15 @@ static const char *rbac_mac_binding_update[] =
     {"logical_port", "ip", "mac", "datapath", "timestamp"};
 
 static const char *rbac_svc_monitor_auth[] =
-    {""};
+    {"chassis_name"};
 static const char *rbac_svc_monitor_auth_update[] =
     {"status"};
 static const char *rbac_igmp_group_auth[] =
-    {""};
+    {"chassis_name"};
 static const char *rbac_igmp_group_update[] =
     {"address", "chassis", "datapath", "ports"};
 static const char *rbac_bfd_auth[] =
-    {""};
+    {"chassis_name"};
 static const char *rbac_bfd_update[] =
     {"status"};
 
@@ -271,7 +271,10 @@ static struct gen_opts_map supported_dhcpv6_opts[] = {
     DHCPV6_OPT_IA_ADDR,
     DHCPV6_OPT_SERVER_ID,
     DHCPV6_OPT_DOMAIN_SEARCH,
-    DHCPV6_OPT_DNS_SERVER
+    DHCPV6_OPT_DNS_SERVER,
+    DHCPV6_OPT_BOOTFILE_NAME,
+    DHCPV6_OPT_BOOTFILE_NAME_ALT,
+    DHCPV6_OPT_FQDN,
 };
 
 static bool
@@ -514,7 +517,9 @@ update_sequence_numbers(int64_t loop_start_time,
                              chassis_priv->name);
             }
 
-            if (chassis_priv->nb_cfg < hv_cfg) {
+            /* Detect if overflows happened within the cfg update. */
+            int64_t delta = chassis_priv->nb_cfg - hv_cfg;
+            if (chassis_priv->nb_cfg < hv_cfg || delta > INT32_MAX) {
                 hv_cfg = chassis_priv->nb_cfg;
                 hv_cfg_ts = chassis_priv->nb_cfg_timestamp;
             } else if (chassis_priv->nb_cfg == hv_cfg &&
@@ -606,6 +611,14 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED,
             ssl_ca_cert_file = optarg;
             break;
 
+        case OPT_SSL_PROTOCOLS:
+            stream_ssl_set_protocols(optarg);
+            break;
+
+        case OPT_SSL_CIPHERS:
+            stream_ssl_set_ciphers(optarg);
+            break;
+
         case 'd':
             ovnsb_db = optarg;
             break;
@@ -680,7 +693,8 @@ update_ssl_config(void)
 }
 
 static struct ovsdb_idl_txn *
-run_idl_loop(struct ovsdb_idl_loop *idl_loop, const char *name)
+run_idl_loop(struct ovsdb_idl_loop *idl_loop, const char *name,
+             uint64_t *idl_duration)
 {
     unsigned long long duration, start = time_msec();
     unsigned int seqno = UINT_MAX;
@@ -688,9 +702,9 @@ run_idl_loop(struct ovsdb_idl_loop *idl_loop, const char *name)
     int n = 0;
 
     /* Accumulate database changes as long as there are some,
-     * but no longer than half a second. */
+     * but no longer than "IDL_LOOP_MAX_DURATION_MS". */
     while (seqno != ovsdb_idl_get_seqno(idl_loop->idl)
-           && time_msec() - start < 500) {
+           && time_msec() - start < IDL_LOOP_MAX_DURATION_MS) {
         seqno = ovsdb_idl_get_seqno(idl_loop->idl);
         ovsdb_idl_run(idl_loop->idl);
         n++;
@@ -699,13 +713,15 @@ run_idl_loop(struct ovsdb_idl_loop *idl_loop, const char *name)
     txn = ovsdb_idl_loop_run(idl_loop);
 
     duration = time_msec() - start;
+    *idl_duration = duration;
     /* ovsdb_idl_run() is called at least 2 times.  Once directly and
      * once in the ovsdb_idl_loop_run().  n > 2 means that we received
      * data on at least 2 subsequent calls. */
     if (n > 2 || duration > 100) {
-        VLOG(duration > 500 ? VLL_INFO : VLL_DBG,
+        VLOG(duration > IDL_LOOP_MAX_DURATION_MS ? VLL_INFO : VLL_DBG,
              "%s IDL run: %d iterations in %lld ms", name, n + 1, duration);
     }
+
     return txn;
 }
 
@@ -743,7 +759,7 @@ main(int argc, char *argv[])
     int res = EXIT_SUCCESS;
     struct unixctl_server *unixctl;
     int retval;
-    bool exiting;
+    struct ovn_exit_args exit_args = {0};
     int n_threads = 1;
     struct northd_state state = {
         .had_lock = false,
@@ -756,7 +772,7 @@ main(int argc, char *argv[])
     service_start(&argc, &argv);
     parse_options(argc, argv, &state.paused, &n_threads);
 
-    daemonize_start(false);
+    daemonize_start(false, false);
 
     char *abs_unixctl_path = get_abs_unix_ctl_path(unixctl_path);
     retval = unixctl_server_create(abs_unixctl_path, &unixctl);
@@ -765,7 +781,8 @@ main(int argc, char *argv[])
     if (retval) {
         exit(EXIT_FAILURE);
     }
-    unixctl_command_register("exit", "", 0, 0, ovn_northd_exit, &exiting);
+    unixctl_command_register("exit", "", 0, 0, ovn_exit_command_callback,
+                             &exit_args);
     unixctl_command_register("pause", "", 0, 0, ovn_northd_pause, &state);
     unixctl_command_register("resume", "", 0, 0, ovn_northd_resume, &state);
     unixctl_command_register("is-paused", "", 0, 0, ovn_northd_is_paused,
@@ -816,10 +833,33 @@ main(int argc, char *argv[])
     ovsdb_idl_track_add_all(ovnsb_idl_loop.idl);
     ovsdb_idl_set_write_changed_only_all(ovnsb_idl_loop.idl, true);
 
+    /* Omit unused columns. */
+    ovsdb_idl_omit(ovnsb_idl_loop.idl, &sbrec_sb_global_col_connections);
+    ovsdb_idl_omit(ovnsb_idl_loop.idl, &sbrec_sb_global_col_ssl);
+
     /* Disable alerting for pure write-only columns. */
     ovsdb_idl_omit_alert(ovnsb_idl_loop.idl, &sbrec_sb_global_col_nb_cfg);
     ovsdb_idl_omit_alert(ovnsb_idl_loop.idl, &sbrec_address_set_col_name);
     ovsdb_idl_omit_alert(ovnsb_idl_loop.idl, &sbrec_address_set_col_addresses);
+    for (size_t i = 0; i < SBREC_LOGICAL_FLOW_N_COLUMNS; i++) {
+        ovsdb_idl_omit_alert(ovnsb_idl_loop.idl,
+                             &sbrec_logical_flow_columns[i]);
+    }
+    for (size_t i = 0; i < SBREC_MULTICAST_GROUP_N_COLUMNS; i++) {
+        ovsdb_idl_omit_alert(ovnsb_idl_loop.idl,
+                             &sbrec_multicast_group_columns[i]);
+    }
+    for (size_t i = 0; i < SBREC_METER_N_COLUMNS; i++) {
+        ovsdb_idl_omit_alert(ovnsb_idl_loop.idl, &sbrec_meter_columns[i]);
+    }
+    for (size_t i = 0; i < SBREC_PORT_GROUP_N_COLUMNS; i++) {
+        ovsdb_idl_omit_alert(ovnsb_idl_loop.idl,
+                             &sbrec_port_group_columns[i]);
+    }
+    for (size_t i = 0; i < SBREC_LOGICAL_DP_GROUP_N_COLUMNS; i++) {
+        ovsdb_idl_omit_alert(ovnsb_idl_loop.idl,
+                             &sbrec_logical_dp_group_columns[i]);
+    }
 
     unixctl_command_register("sb-connection-status", "", 0, 0,
                              ovn_conn_show, ovnsb_idl_loop.idl);
@@ -837,9 +877,16 @@ main(int argc, char *argv[])
     stopwatch_create(LFLOWS_DATAPATHS_STOPWATCH_NAME, SW_MS);
     stopwatch_create(LFLOWS_PORTS_STOPWATCH_NAME, SW_MS);
     stopwatch_create(LFLOWS_LBS_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(LFLOWS_LR_STATEFUL_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(LFLOWS_LS_STATEFUL_STOPWATCH_NAME, SW_MS);
     stopwatch_create(LFLOWS_IGMP_STOPWATCH_NAME, SW_MS);
     stopwatch_create(LFLOWS_DP_GROUPS_STOPWATCH_NAME, SW_MS);
     stopwatch_create(LFLOWS_TO_SB_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(PORT_GROUP_RUN_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(SYNC_METERS_RUN_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(LR_NAT_RUN_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(LR_STATEFUL_RUN_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(LS_STATEFUL_RUN_STOPWATCH_NAME, SW_MS);
 
     /* Initialize incremental processing engine for ovn-northd */
     inc_proc_northd_init(&ovnnb_idl_loop, &ovnsb_idl_loop);
@@ -850,10 +897,9 @@ main(int argc, char *argv[])
     run_update_worker_pool(n_threads);
 
     /* Main loop. */
-    exiting = false;
+    struct northd_engine_context eng_ctx = {0};
 
-    bool recompute = false;
-    while (!exiting) {
+    while (!exit_args.exiting) {
         update_ssl_config();
         memory_run();
         if (memory_should_report()) {
@@ -865,6 +911,7 @@ main(int argc, char *argv[])
             simap_destroy(&usage);
         }
 
+        bool clear_idl_track = true;
         if (!state.paused) {
             if (!ovsdb_idl_has_lock(ovnsb_idl_loop.idl) &&
                 !ovsdb_idl_is_lock_contended(ovnsb_idl_loop.idl))
@@ -877,26 +924,28 @@ main(int argc, char *argv[])
                 ovsdb_idl_set_lock(ovnsb_idl_loop.idl, "ovn_northd");
             }
 
-            struct ovsdb_idl_txn *ovnnb_txn = run_idl_loop(&ovnnb_idl_loop,
-                                                           "OVN_Northbound");
+            struct ovsdb_idl_txn *ovnnb_txn =
+                    run_idl_loop(&ovnnb_idl_loop, "OVN_Northbound",
+                                 &eng_ctx.nb_idl_duration_ms);
             unsigned int new_ovnnb_cond_seqno =
                         ovsdb_idl_get_condition_seqno(ovnnb_idl_loop.idl);
             if (new_ovnnb_cond_seqno != ovnnb_cond_seqno) {
                 if (!new_ovnnb_cond_seqno) {
                     VLOG_INFO("OVN NB IDL reconnected, force recompute.");
-                    recompute = true;
+                    eng_ctx.recompute = true;
                 }
                 ovnnb_cond_seqno = new_ovnnb_cond_seqno;
             }
 
-            struct ovsdb_idl_txn *ovnsb_txn = run_idl_loop(&ovnsb_idl_loop,
-                                                           "OVN_Southbound");
+            struct ovsdb_idl_txn *ovnsb_txn =
+                    run_idl_loop(&ovnsb_idl_loop, "OVN_Southbound",
+                                 &eng_ctx.sb_idl_duration_ms);
             unsigned int new_ovnsb_cond_seqno =
                         ovsdb_idl_get_condition_seqno(ovnsb_idl_loop.idl);
             if (new_ovnsb_cond_seqno != ovnsb_cond_seqno) {
                 if (!new_ovnsb_cond_seqno) {
                     VLOG_INFO("OVN SB IDL reconnected, force recompute.");
-                    recompute = true;
+                    eng_ctx.recompute = true;
                 }
                 ovnsb_cond_seqno = new_ovnsb_cond_seqno;
             }
@@ -914,25 +963,27 @@ main(int argc, char *argv[])
             }
 
             if (ovsdb_idl_has_lock(ovnsb_idl_loop.idl)) {
-                int64_t loop_start_time = time_wall_msec();
-                bool activity = inc_proc_northd_run(ovnnb_txn, ovnsb_txn,
-                                                    recompute);
-                recompute = false;
-                if (ovnsb_txn) {
+                bool activity = false;
+                if (ovnnb_txn && ovnsb_txn &&
+                    inc_proc_northd_can_run(&eng_ctx)) {
+                    int64_t loop_start_time = time_wall_msec();
+                    activity = inc_proc_northd_run(ovnnb_txn, ovnsb_txn,
+                                                   &eng_ctx);
+                    eng_ctx.recompute = false;
                     check_and_add_supported_dhcp_opts_to_sb_db(
                                  ovnsb_txn, ovnsb_idl_loop.idl);
                     check_and_add_supported_dhcpv6_opts_to_sb_db(
                                  ovnsb_txn, ovnsb_idl_loop.idl);
                     check_and_update_rbac(
                                  ovnsb_txn, ovnsb_idl_loop.idl);
-                }
 
-                if (ovnnb_txn && ovnsb_txn) {
                     update_sequence_numbers(loop_start_time,
                                             ovnnb_idl_loop.idl,
                                             ovnsb_idl_loop.idl,
                                             ovnnb_txn, ovnsb_txn,
                                             &ovnsb_idl_loop);
+                } else if (!eng_ctx.recompute) {
+                    clear_idl_track = false;
                 }
 
                 /* If there are any errors, we force a full recompute in order
@@ -940,13 +991,13 @@ main(int argc, char *argv[])
                 if (!ovsdb_idl_loop_commit_and_wait(&ovnnb_idl_loop)) {
                     VLOG_INFO("OVNNB commit failed, "
                               "force recompute next time.");
-                    recompute = true;
+                    eng_ctx.recompute = true;
                 }
 
                 if (!ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop)) {
                     VLOG_INFO("OVNSB commit failed, "
                               "force recompute next time.");
-                    recompute = true;
+                    eng_ctx.recompute = true;
                 }
                 run_memory_trimmer(ovnnb_idl_loop.idl, activity);
             } else {
@@ -955,7 +1006,7 @@ main(int argc, char *argv[])
                 ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
 
                 /* Force a full recompute next time we become active. */
-                recompute = true;
+                eng_ctx.recompute = true;
             }
         } else {
             /* ovn-northd is paused
@@ -979,16 +1030,18 @@ main(int argc, char *argv[])
             ovsdb_idl_wait(ovnsb_idl_loop.idl);
 
             /* Force a full recompute next time we become active. */
-            recompute = true;
+            eng_ctx.recompute = true;
         }
 
-        ovsdb_idl_track_clear(ovnnb_idl_loop.idl);
-        ovsdb_idl_track_clear(ovnsb_idl_loop.idl);
+        if (clear_idl_track) {
+            ovsdb_idl_track_clear(ovnnb_idl_loop.idl);
+            ovsdb_idl_track_clear(ovnsb_idl_loop.idl);
+        }
 
         unixctl_server_run(unixctl);
         unixctl_server_wait(unixctl);
         memory_wait();
-        if (exiting) {
+        if (exit_args.exiting) {
             poll_immediate_wake();
         }
 
@@ -999,6 +1052,9 @@ main(int argc, char *argv[])
         if (nb) {
             interval = smap_get_int(&nb->options, "northd_probe_interval",
                                     interval);
+            eng_ctx.backoff_ms =
+                    smap_get_uint(&nb->options, "northd-backoff-interval-ms",
+                                  0);
         }
         set_idl_probe_interval(ovnnb_idl_loop.idl, ovnnb_db, interval);
         set_idl_probe_interval(ovnsb_idl_loop.idl, ovnsb_db, interval);
@@ -1018,28 +1074,21 @@ main(int argc, char *argv[])
         stopwatch_stop(NORTHD_LOOP_STOPWATCH_NAME, time_msec());
         poll_block();
         if (should_service_stop()) {
-            exiting = true;
+            exit_args.exiting = true;
         }
         stopwatch_start(NORTHD_LOOP_STOPWATCH_NAME, time_msec());
     }
     inc_proc_northd_cleanup();
 
-    unixctl_server_destroy(unixctl);
     ovsdb_idl_loop_destroy(&ovnnb_idl_loop);
     ovsdb_idl_loop_destroy(&ovnsb_idl_loop);
+    ovn_exit_args_finish(&exit_args);
+    unixctl_server_destroy(unixctl);
     service_stop();
+    run_update_worker_pool(0);
+    ovsrcu_exit();
 
     exit(res);
-}
-
-static void
-ovn_northd_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
-                const char *argv[] OVS_UNUSED, void *exiting_)
-{
-    bool *exiting = exiting_;
-    *exiting = true;
-
-    unixctl_command_reply(conn, NULL);
 }
 
 static void

@@ -106,11 +106,16 @@ Options:\n\
                             (default: %s)\n\
   --ovnsb-db=DATABASE       connect to ovn-sb database at DATABASE\n\
                             (default: %s)\n\
+  --ic-nb-db=DATABASE       connect to ovn-ic-nb database at DATABASE\n\
+                            (default: %s)\n\
+  --ic-sb-db=DATABASE       connect to ovn-ic-sb database at DATABASE\n\
+                            (default: %s)\n\
   --unixctl=SOCKET          override default control socket name\n\
   -h, --help                display this help message\n\
   -o, --options             list available options\n\
   -V, --version             display version information\n\
-", program_name, program_name, default_nb_db(), default_sb_db());
+", program_name, program_name, default_nb_db(), default_sb_db(),
+    default_ic_nb_db(), default_ic_sb_db());
     daemon_usage();
     vlog_usage();
     stream_usage("database", true, true, false);
@@ -127,14 +132,18 @@ az_run(struct ic_context *ctx)
         return NULL;
     }
 
-    /* Delete old AZ if name changes.  Note: if name changed when ovn-ic
-     * is not running, one has to manually delete the old AZ with:
+    /* Update old AZ if name changes.  Note: if name changed when ovn-ic
+     * is not running, one has to manually delete/update the old AZ with:
      * "ovn-ic-sbctl destroy avail <az>". */
     static char *az_name;
     const struct icsbrec_availability_zone *az;
     if (az_name && strcmp(az_name, nb_global->name)) {
         ICSBREC_AVAILABILITY_ZONE_FOR_EACH (az, ctx->ovnisb_idl) {
-            if (!strcmp(az->name, az_name)) {
+            /* AZ name update locally need to update az in ISB. */
+            if (nb_global->name[0] && !strcmp(az->name, az_name)) {
+                icsbrec_availability_zone_set_name(az, nb_global->name);
+                break;
+            } else if (!nb_global->name[0] && !strcmp(az->name, az_name)) {
                 icsbrec_availability_zone_delete(az);
                 break;
             }
@@ -646,6 +655,11 @@ sync_remote_port(struct ic_context *ctx,
     /* Sync tunnel key from ISB to NB */
     sync_lsp_tnl_key(lsp, isb_pb->tunnel_key);
 
+    /* Skip port binding if it is already requested by the CMS. */
+    if (smap_get(&lsp->options, "requested-chassis")) {
+        return;
+    }
+
     /* Sync gateway from ISB to SB */
     if (isb_pb->gateway[0]) {
         if (!sb_pb->chassis || strcmp(sb_pb->chassis->name, isb_pb->gateway)) {
@@ -861,6 +875,8 @@ struct ic_route_info {
     const char *origin;
     const char *route_table;
 
+    const struct nbrec_logical_router *nb_lr;
+
     /* Either nb_route or nb_lrp is set and the other one must be NULL.
      * - For a route that is learned from IC-SB, or a static route that is
      *   generated from a route that is configured in NB, the "nb_route"
@@ -937,7 +953,8 @@ parse_route(const char *s_prefix, const char *s_nexthop,
 /* Return false if can't be added due to bad format. */
 static bool
 add_to_routes_learned(struct hmap *routes_learned,
-                      const struct nbrec_logical_router_static_route *nb_route)
+                      const struct nbrec_logical_router_static_route *nb_route,
+                      const struct nbrec_logical_router *nb_lr)
 {
     struct in6_addr prefix, nexthop;
     unsigned int plen;
@@ -959,6 +976,7 @@ add_to_routes_learned(struct hmap *routes_learned,
     ic_route->nb_route = nb_route;
     ic_route->origin = origin;
     ic_route->route_table = nb_route->route_table;
+    ic_route->nb_lr = nb_lr;
     hmap_insert(routes_learned, &ic_route->node,
                 ic_route_hash(&prefix, plen, &nexthop, origin,
                               nb_route->route_table));
@@ -1099,7 +1117,8 @@ add_to_routes_ad(struct hmap *routes_ad, const struct in6_addr prefix,
                  unsigned int plen, const struct in6_addr nexthop,
                  const char *origin, const char *route_table,
                  const struct nbrec_logical_router_port *nb_lrp,
-                 const struct nbrec_logical_router_static_route *nb_route)
+                 const struct nbrec_logical_router_static_route *nb_route,
+                 const struct nbrec_logical_router *nb_lr)
 {
     if (route_table == NULL) {
         route_table = "";
@@ -1117,6 +1136,7 @@ add_to_routes_ad(struct hmap *routes_ad, const struct in6_addr prefix,
         ic_route->origin = origin;
         ic_route->route_table = route_table;
         ic_route->nb_lrp = nb_lrp;
+        ic_route->nb_lr = nb_lr;
         hmap_insert(routes_ad, &ic_route->node, hash);
     } else {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
@@ -1130,6 +1150,7 @@ static void
 add_static_to_routes_ad(
     struct hmap *routes_ad,
     const struct nbrec_logical_router_static_route *nb_route,
+    const struct nbrec_logical_router *nb_lr,
     const struct lport_addresses *nexthop_addresses,
     const struct smap *nb_options)
 {
@@ -1172,14 +1193,15 @@ add_static_to_routes_ad(
     }
 
     add_to_routes_ad(routes_ad, prefix, plen, nexthop, ROUTE_ORIGIN_STATIC,
-                     nb_route->route_table, NULL, nb_route);
+                     nb_route->route_table, NULL, nb_route, nb_lr);
 }
 
 static void
 add_network_to_routes_ad(struct hmap *routes_ad, const char *network,
                          const struct nbrec_logical_router_port *nb_lrp,
                          const struct lport_addresses *nexthop_addresses,
-                         const struct smap *nb_options)
+                         const struct smap *nb_options,
+                         const struct nbrec_logical_router *nb_lr)
 {
     struct in6_addr prefix, nexthop;
     unsigned int plen;
@@ -1218,7 +1240,7 @@ add_network_to_routes_ad(struct hmap *routes_ad, const char *network,
 
     /* directly-connected routes go to <main> route table */
     add_to_routes_ad(routes_ad, prefix, plen, nexthop, ROUTE_ORIGIN_CONNECTED,
-                     NULL, nb_lrp, NULL);
+                     NULL, nb_lrp, NULL, nb_lr);
 }
 
 static bool
@@ -1322,7 +1344,6 @@ lrp_is_ts_port(struct ic_context *ctx, struct ic_router_info *ic_lr,
 
 static void
 sync_learned_routes(struct ic_context *ctx,
-                    const struct icsbrec_availability_zone *az,
                     struct ic_router_info *ic_lr)
 {
     ovs_assert(ctx->ovnnb_txn);
@@ -1345,7 +1366,15 @@ sync_learned_routes(struct ic_context *ctx,
 
         ICSBREC_ROUTE_FOR_EACH_EQUAL (isb_route, isb_route_key,
                                       ctx->icsbrec_route_by_ts) {
-            if (isb_route->availability_zone == az) {
+            const char *lr_id = smap_get(&isb_route->external_ids, "lr-id");
+            if (lr_id == NULL) {
+                continue;
+            }
+            struct uuid lr_uuid;
+            if (!uuid_from_string(&lr_uuid, lr_id)) {
+                continue;
+            }
+            if (uuid_equals(&ic_lr->lr->header_.uuid, &lr_uuid)) {
                 continue;
             }
 
@@ -1435,13 +1464,21 @@ static void
 ad_route_sync_external_ids(const struct ic_route_info *route_adv,
                            const struct icsbrec_route *isb_route)
 {
-    struct uuid isb_ext_id, nb_id;
+    struct uuid isb_ext_id, nb_id, isb_ext_lr_id, lr_id;
     smap_get_uuid(&isb_route->external_ids, "nb-id", &isb_ext_id);
+    smap_get_uuid(&isb_route->external_ids, "lr-id", &isb_ext_lr_id);
     nb_id = route_adv->nb_route ? route_adv->nb_route->header_.uuid
                                : route_adv->nb_lrp->header_.uuid;
+    lr_id = route_adv->nb_lr->header_.uuid;
     if (!uuid_equals(&isb_ext_id, &nb_id)) {
         char *uuid_s = xasprintf(UUID_FMT, UUID_ARGS(&nb_id));
         icsbrec_route_update_external_ids_setkey(isb_route, "nb-id",
+                                                 uuid_s);
+        free(uuid_s);
+    }
+    if (!uuid_equals(&isb_ext_lr_id, &lr_id)) {
+        char *uuid_s = xasprintf(UUID_FMT, UUID_ARGS(&lr_id));
+        icsbrec_route_update_external_ids_setkey(isb_route, "lr-id",
                                                  uuid_s);
         free(uuid_s);
     }
@@ -1549,7 +1586,7 @@ build_ts_routes_to_adv(struct ic_context *ctx,
         if (smap_get_uuid(&nb_route->external_ids, "ic-learned-route",
                           &isb_uuid)) {
             /* It is a learned route */
-            if (!add_to_routes_learned(&ic_lr->routes_learned, nb_route)) {
+            if (!add_to_routes_learned(&ic_lr->routes_learned, nb_route, lr)) {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
                 VLOG_WARN_RL(&rl, "Bad format of learned route in NB: "
                              "%s -> %s. Delete it.", nb_route->ip_prefix,
@@ -1559,7 +1596,7 @@ build_ts_routes_to_adv(struct ic_context *ctx,
             }
         } else if (!strcmp(ts_route_table, nb_route->route_table)) {
             /* It may be a route to be advertised */
-            add_static_to_routes_ad(routes_ad, nb_route, ts_port_addrs,
+            add_static_to_routes_ad(routes_ad, nb_route, lr, ts_port_addrs,
                                     &nb_global->options);
         }
     }
@@ -1571,7 +1608,8 @@ build_ts_routes_to_adv(struct ic_context *ctx,
             for (int j = 0; j < lrp->n_networks; j++) {
                 add_network_to_routes_ad(routes_ad, lrp->networks[j], lrp,
                                          ts_port_addrs,
-                                         &nb_global->options);
+                                         &nb_global->options,
+                                         lr);
             }
         } else {
             /* The router port of the TS port is ignored. */
@@ -1582,9 +1620,9 @@ build_ts_routes_to_adv(struct ic_context *ctx,
 }
 
 static void
-advertise_lr_routes(struct ic_context *ctx,
-                    const struct icsbrec_availability_zone *az,
-                    struct ic_router_info *ic_lr)
+collect_lr_routes(struct ic_context *ctx,
+                  struct ic_router_info *ic_lr,
+                  struct shash *routes_ad_by_ts)
 {
     const struct nbrec_nb_global *nb_global =
         nbrec_nb_global_first(ctx->ovnnb_idl);
@@ -1595,15 +1633,26 @@ advertise_lr_routes(struct ic_context *ctx,
     struct lport_addresses ts_port_addrs;
     const struct icnbrec_transit_switch *key;
 
-    struct hmap routes_ad = HMAP_INITIALIZER(&routes_ad);
+    struct hmap *routes_ad;
+    const struct icnbrec_transit_switch *t_sw;
     for (int i = 0; i < ic_lr->n_isb_pbs; i++) {
         isb_pb = ic_lr->isb_pbs[i];
         key = icnbrec_transit_switch_index_init_row(
             ctx->icnbrec_transit_switch_by_name);
         icnbrec_transit_switch_index_set_name(key, isb_pb->transit_switch);
-        ts_name = icnbrec_transit_switch_index_find(
-            ctx->icnbrec_transit_switch_by_name, key)->name;
+        t_sw = icnbrec_transit_switch_index_find(
+             ctx->icnbrec_transit_switch_by_name, key);
         icnbrec_transit_switch_index_destroy_row(key);
+        if (!t_sw) {
+            continue;
+        }
+        ts_name = t_sw->name;
+        routes_ad = shash_find_data(routes_ad_by_ts, ts_name);
+        if (!routes_ad) {
+            routes_ad = xzalloc(sizeof *routes_ad);
+            hmap_init(routes_ad);
+            shash_add(routes_ad_by_ts, ts_name, routes_ad);
+        }
 
         if (!extract_lsp_addresses(isb_pb->address, &ts_port_addrs)) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
@@ -1615,12 +1664,10 @@ advertise_lr_routes(struct ic_context *ctx,
         }
         lrp_name = get_lrp_name_by_ts_port_name(ctx, isb_pb->logical_port);
         route_table = get_route_table_by_lrp_name(ctx, lrp_name);
-        build_ts_routes_to_adv(ctx, ic_lr, &routes_ad, &ts_port_addrs,
+        build_ts_routes_to_adv(ctx, ic_lr, routes_ad, &ts_port_addrs,
                                nb_global, route_table);
-        advertise_routes(ctx, az, ts_name, &routes_ad);
         destroy_lport_addresses(&ts_port_addrs);
     }
-    hmap_destroy(&routes_ad);
 }
 
 static void
@@ -1721,14 +1768,21 @@ route_run(struct ic_context *ctx,
     icsbrec_port_binding_index_destroy_row(isb_pb_key);
 
     struct ic_router_info *ic_lr;
+    struct shash routes_ad_by_ts = SHASH_INITIALIZER(&routes_ad_by_ts);
     HMAP_FOR_EACH_SAFE (ic_lr, node, &ic_lrs) {
-        advertise_lr_routes(ctx, az, ic_lr);
-        sync_learned_routes(ctx, az, ic_lr);
+        collect_lr_routes(ctx, ic_lr, &routes_ad_by_ts);
+        sync_learned_routes(ctx, ic_lr);
         free(ic_lr->isb_pbs);
         hmap_destroy(&ic_lr->routes_learned);
         hmap_remove(&ic_lrs, &ic_lr->node);
         free(ic_lr);
     }
+    struct shash_node *node;
+    SHASH_FOR_EACH (node, &routes_ad_by_ts) {
+        advertise_routes(ctx, az, node->name, node->data);
+        hmap_destroy(node->data);
+    }
+    shash_destroy_free_data(&routes_ad_by_ts);
     hmap_destroy(&ic_lrs);
 }
 
@@ -1794,6 +1848,14 @@ parse_options(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
         case 'C':
             ssl_ca_cert_file = optarg;
+            break;
+
+        case OPT_SSL_PROTOCOLS:
+            stream_ssl_set_protocols(optarg);
+            break;
+
+        case OPT_SSL_CIPHERS:
+            stream_ssl_set_ciphers(optarg);
             break;
 
         case 'd':
@@ -1912,7 +1974,7 @@ main(int argc, char *argv[])
     service_start(&argc, &argv);
     parse_options(argc, argv);
 
-    daemonize_start(false);
+    daemonize_start(false, false);
 
     char *abs_unixctl_path = get_abs_unix_ctl_path(unixctl_path);
     retval = unixctl_server_create(abs_unixctl_path, &unixctl);
@@ -2171,10 +2233,19 @@ main(int argc, char *argv[])
                 ovn_db_run(&ctx);
             }
 
-            ovsdb_idl_loop_commit_and_wait(&ovnnb_idl_loop);
-            ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
-            ovsdb_idl_loop_commit_and_wait(&ovninb_idl_loop);
-            ovsdb_idl_loop_commit_and_wait(&ovnisb_idl_loop);
+            int rc1 = ovsdb_idl_loop_commit_and_wait(&ovnnb_idl_loop);
+            int rc2 = ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
+            int rc3 = ovsdb_idl_loop_commit_and_wait(&ovninb_idl_loop);
+            int rc4 = ovsdb_idl_loop_commit_and_wait(&ovnisb_idl_loop);
+            if (!rc1 || !rc2 || !rc3 || !rc4) {
+                VLOG_DBG(" a transaction failed in: %s %s %s %s",
+                         !rc1 ? "nb" : "", !rc2 ? "sb" : "",
+                         !rc3 ? "ic_nb" : "", rc4 ? "ic_sb" : "");
+                /* A transaction failed. Wake up immediately to give
+                 * opportunity to send the proper transaction
+                 */
+                poll_immediate_wake();
+            }
         } else {
             /* ovn-ic is paused
              *    - we still want to handle any db updates and update the

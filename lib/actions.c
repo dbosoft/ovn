@@ -79,7 +79,7 @@ ovnact_init(struct ovnact *ovnact, enum ovnact_type type, size_t len)
     ovnact->len = len;
 }
 
-static size_t
+size_t
 encode_start_controller_op(enum action_opcode opcode, bool pause,
                            uint32_t meter_id, struct ofpbuf *ofpacts)
 {
@@ -100,7 +100,7 @@ encode_start_controller_op(enum action_opcode opcode, bool pause,
     return ofs;
 }
 
-static void
+void
 encode_finish_controller_op(size_t ofs, struct ofpbuf *ofpacts)
 {
     struct ofpact_controller *oc = ofpbuf_at_assert(ofpacts, ofs, sizeof *oc);
@@ -1131,8 +1131,20 @@ encode_ct_nat(const struct ovnact_ct_nat *cn,
     }
 
     if (cn->port_range.exists) {
-       nat->range.proto.min = cn->port_range.port_lo;
-       nat->range.proto.max = cn->port_range.port_hi;
+        nat->range.proto.min = cn->port_range.port_lo;
+        nat->range.proto.max = cn->port_range.port_hi;
+
+        /* Explicitly set the port selection algorithm to "random".  Otherwise
+         * it's up to the datapath to choose how to select the port and that
+         * might create unexpected behavior changes when the datapath defaults
+         * change.
+         *
+         * NOTE: for the userspace datapath the "random" function doesn't
+         * really generate random ports, it uses "hash" under the hood:
+         * https://issues.redhat.com/browse/FDP-269. */
+        if (nat->range.proto.min && nat->range.proto.max) {
+            nat->flags |= NX_NAT_F_PROTO_RANDOM;
+        }
     }
 
     ofpacts->header = ofpbuf_push_uninit(ofpacts, nat_offset);
@@ -1624,6 +1636,12 @@ encode_SELECT(const struct ovnact_select *select,
 
     struct ds ds = DS_EMPTY_INITIALIZER;
     ds_put_format(&ds, "type=select,selection_method=dp_hash");
+
+    if (ovs_feature_is_supported(OVS_DP_HASH_L4_SYM_SUPPORT)) {
+        /* Select dp-hash l4_symmetric by setting the upper 32bits of
+         * selection_method_param to value 1 (1 << 32): */
+        ds_put_cstr(&ds, ",selection_method_param=0x100000000");
+    }
 
     struct mf_subfield sf = expr_resolve_field(&select->res_field);
 
@@ -2470,7 +2488,8 @@ parse_gen_opt(struct action_context *ctx, struct ovnact_gen_option *o,
     }
 
     if (!strcmp(o->option->type, "str") ||
-        !strcmp(o->option->type, "domains")) {
+        !strcmp(o->option->type, "domains") ||
+        !strcmp(o->option->type, "domain")) {
         if (o->value.type != EXPR_C_STRING) {
             lexer_error(ctx->lexer, "%s option %s requires string value.",
                         opts_type, o->option->name);
@@ -2882,27 +2901,33 @@ static void
 encode_put_dhcpv6_option(const struct ovnact_gen_option *o,
                          struct ofpbuf *ofpacts)
 {
-    struct dhcp_opt6_header *opt = ofpbuf_put_uninit(ofpacts, sizeof *opt);
+    struct dhcpv6_opt_header *opt = ofpbuf_put_uninit(ofpacts, sizeof *opt);
     const union expr_constant *c = o->value.values;
     size_t n_values = o->value.n_values;
     size_t size;
 
-    opt->opt_code = htons(o->option->code);
+    opt->code = htons(o->option->code);
 
     if (!strcmp(o->option->type, "ipv6")) {
         size = n_values * sizeof(struct in6_addr);
-        opt->size = htons(size);
+        opt->len = htons(size);
         for (size_t i = 0; i < n_values; i++) {
             ofpbuf_put(ofpacts, &c[i].value.ipv6, sizeof(struct in6_addr));
         }
     } else if (!strcmp(o->option->type, "mac")) {
         size = sizeof(struct eth_addr);
-        opt->size = htons(size);
+        opt->len = htons(size);
         ofpbuf_put(ofpacts, &c->value.mac, size);
     } else if (!strcmp(o->option->type, "str")) {
         size = strlen(c->string);
-        opt->size = htons(size);
+        opt->len = htons(size);
         ofpbuf_put(ofpacts, c->string, size);
+    } else if (!strcmp(o->option->type, "domain")) {
+        char *encoded = encode_fqdn_string(c->string, &size);
+        opt->len = htons(size);
+        ofpbuf_put(ofpacts, encoded, size);
+
+        free(encoded);
     }
 }
 
@@ -4991,6 +5016,7 @@ encode_COMMIT_LB_AFF(const struct ovnact_commit_lb_aff *lb_aff,
     ol->hard_timeout = OFP_FLOW_PERMANENT;
     ol->priority = OFP_DEFAULT_PRIORITY;
     ol->table_id = OFTABLE_CHK_LB_AFFINITY;
+    ol->cookie = htonll(ep->lflow_uuid.parts[0]);
 
     /* Match on metadata of the packet that created the new table. */
     ol_spec = ofpbuf_put_zeros(ofpacts, sizeof *ol_spec);
@@ -5217,6 +5243,20 @@ encode_CHK_LB_AFF(const struct ovnact_result *res,
                            MLF_USE_LB_AFF_SESSION_BIT, ofpacts);
 }
 
+static void
+format_MAC_CACHE_USE(const struct ovnact_null *null OVS_UNUSED, struct ds *s)
+{
+    ds_put_cstr(s, "mac_cache_use;");
+}
+
+static void
+encode_MAC_CACHE_USE(const struct ovnact_null *null OVS_UNUSED,
+                     const struct ovnact_encode_params *ep,
+                     struct ofpbuf *ofpacts)
+{
+    emit_resubmit(ofpacts, ep->mac_cache_use_table);
+}
+
 /* Parses an assignment or exchange or put_dhcp_opts action. */
 static void
 parse_set_action(struct action_context *ctx)
@@ -5422,6 +5462,8 @@ parse_action(struct action_context *ctx)
         parse_commit_lb_aff(ctx, ovnact_put_COMMIT_LB_AFF(ctx->ovnacts));
     } else if (lexer_match_id(ctx->lexer, "sample")) {
         parse_sample(ctx);
+    } else if (lexer_match_id(ctx->lexer, "mac_cache_use")) {
+        ovnact_put_MAC_CACHE_USE(ctx->ovnacts);
     } else {
         lexer_syntax_error(ctx->lexer, "expecting action");
     }

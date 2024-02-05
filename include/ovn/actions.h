@@ -126,6 +126,7 @@ struct collector_set_ids;
     OVNACT(COMMIT_LB_AFF,     ovnact_commit_lb_aff)   \
     OVNACT(CHK_LB_AFF,        ovnact_result)          \
     OVNACT(SAMPLE,            ovnact_sample)          \
+    OVNACT(MAC_CACHE_USE,     ovnact_null)            \
 
 /* enum ovnact_type, with a member OVNACT_<ENUM> for each action. */
 enum OVS_PACKED_ENUM ovnact_type {
@@ -746,6 +747,9 @@ enum action_opcode {
 
     /* activation_strategy_rarp() */
     ACTION_OPCODE_ACTIVATION_STRATEGY_RARP,
+
+    /* multicast group split buffer action. */
+    ACTION_OPCODE_MG_SPLIT_BUF,
 };
 
 /* Header. */
@@ -754,12 +758,6 @@ struct action_header {
     uint8_t pad[4];
 };
 BUILD_ASSERT_DECL(sizeof(struct action_header) == 8);
-
-OVS_PACKED(
-struct ovnfield_act_header {
-    ovs_be16 id; /* one of enum ovnfield_id. */
-    ovs_be16 len; /* Length of the ovnfield data. */
-});
 
 struct ovnact_parse_params {
     /* A table of "struct expr_symbol"s to support (as one would provide to
@@ -885,6 +883,8 @@ struct ovnact_encode_params {
                                    sends packets to controller. */
     uint32_t common_nat_ct_zone; /* When performing NAT in a common CT zone,
                                     this determines which CT zone to use */
+    uint32_t mac_cache_use_table; /* OpenFlow table for 'mac_cache_use'
+                                   * to resubmit. */
 };
 
 void ovnacts_encode(const struct ovnact[], size_t ovnacts_len,
@@ -895,6 +895,9 @@ void ovnacts_free(struct ovnact[], size_t ovnacts_len);
 char *ovnact_op_to_string(uint32_t);
 int encode_ra_dnssl_opt(char *data, char *buf, int buf_len);
 
+size_t encode_start_controller_op(enum action_opcode opcode, bool pause,
+                                  uint32_t meter_id, struct ofpbuf *ofpacts);
+void encode_finish_controller_op(size_t ofs, struct ofpbuf *ofpacts);
 void encode_controller_op(enum action_opcode opcode, uint32_t meter_id,
                           struct ofpbuf *ofpacts);
 

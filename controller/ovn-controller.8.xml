@@ -121,12 +121,18 @@
           that is needed in the current chassis.
         </p>
         <p>
-          It is more optimal to set it to <code>true</code> in use cases when
-          the chassis would anyway need to monitor most of the records in
-          <var>ovs-database</var>, which would save the overhead of conditions
-          processing, especially for server side.  Typically, set it to
-          <code>true</code> for environments that all workloads need to be
+          It is more efficient to set it to <code>true</code> in use cases
+          where the chassis would anyway need to monitor most of the records in
+          <var>OVN Southbound</var> database, which would save the overhead of
+          conditions processing, especially for server side.  Typically, set it
+          to <code>true</code> for environments that all workloads need to be
           reachable from each other.
+        </p>
+        <p>
+          NOTE: for efficiency and scalability in common scenarios
+          <code>ovn-controller</code> unconditionally monitors all sub-ports
+          (ports with <code>parent_port</code> set) regardless of the
+          <code>ovn-monitor-all</code> value.
         </p>
         <p>
           Default value is <var>false</var>.
@@ -147,20 +153,6 @@
         </p>
       </dd>
 
-      <dt><code>external_ids:ovn-openflow-probe-interval</code></dt>
-      <dd>
-        <p>
-          The inactivity probe interval of the OpenFlow connection to the
-          OpenvSwitch integration bridge, in seconds.
-          If the value is zero, it disables the connection keepalive feature.
-        </p>
-
-        <p>
-          If the value is nonzero, then it will be forced to a value of
-          at least 5s.
-        </p>
-      </dd>
-
       <dt><code>external_ids:ovn-encap-type</code></dt>
       <dd>
         <p>
@@ -171,24 +163,45 @@
         </p>
 
         <p>
-          Supported tunnel types for connecting hypervisors
-          are <code>geneve</code> and <code>stt</code>.  Gateways may
-          use <code>geneve</code>, <code>vxlan</code>, or
-          <code>stt</code>.
+          Supported tunnel types for connecting hypervisors and gateways
+          are <code>geneve</code>, <code>vxlan</code>, and <code>stt</code>.
         </p>
 
         <p>
           Due to the limited amount of metadata in <code>vxlan</code>,
-          the capabilities and performance of connected gateways will be
-          reduced versus other tunnel formats.
+          the capabilities and performance of connected gateways and
+          hypervisors will be reduced versus other tunnel formats.
         </p>
       </dd>
 
       <dt><code>external_ids:ovn-encap-ip</code></dt>
       <dd>
-        The IP address that a chassis should use to connect to this node
-        using encapsulation types specified by
-        <code>external_ids:ovn-encap-type</code>.
+        <p>
+          The IP address that a chassis should use to connect to this node
+          using encapsulation types specified by
+          <code>external_ids:ovn-encap-type</code>. Multiple encapsulation IPs
+          may be specified with a comma-separated list.
+        </p>
+        <p>
+          In scenarios where multiple encapsulation IPs are present, distinct
+          tunnels are established for each remote chassis. These tunnels are
+          differentiated by setting unique <code>options:local_ip</code> and
+          <code>options:remote_ip</code> values in the tunnel interface. When
+          transmitting a packet to a remote chassis, the selection of local_ip
+          is guided by the <code>Interface:external_ids:encap-ip</code> from
+          the local OVSDB, corresponding to the VIF originating the packet, if
+          specified. The <code>Interface:external_ids:encap-ip</code> setting
+          of the VIF is also populated to the <code>Port_Binding</code>
+          table in the OVN SB database via the <code>encap</code> column.
+          Consequently, when a remote chassis needs to send a packet to a
+          port-binding associated with this VIF, it utilizes the tunnel with
+          the appropriate <code>options:remote_ip</code> that matches the
+          <code>ip</code> in <code>Port_Binding:encap</code>. This mechanism
+          is particularly beneficial for chassis with multiple physical
+          interfaces designated for tunneling, where each interface is
+          optimized for handling specific traffic associated with particular
+          VIFs.
+        </p>
       </dd>
 
       <dt><code>external_ids:ovn-encap-df_default</code></dt>
@@ -359,7 +372,21 @@
         The boolean flag indicates if <code>ovn-controller</code> when create
         tunnel ports should set <code>local_ip</code> parameter.  Can be
         heplful to pin source outer IP for the tunnel when multiple interfaces
-        are used on the host for overlay traffic.
+        are used on the host for overlay traffic. This is also useful when
+        running multiple <code>ovn-controller</code> instances on the same
+        chassis, in which case this setting will guarantee that their tunnel
+        ports have unique configuration and can exist in parallel.
+      </dd>
+      <dt><code>external_ids:garp-max-timeout-sec</code></dt>
+      <dd>
+        When used, this configuration value specifies the maximum timeout
+        (in seconds) between two consecutive GARP packets sent by
+        <code>ovn-controller</code>.
+        <code>ovn-controller</code> by default sends just 4 GARP packets
+        with an exponential backoff timeout.
+        Setting <code>external_ids:garp-max-timeout-sec</code> allows to
+        cap for the exponential backoff used by <code>ovn-controller</code>
+        to send GARPs packets.
       </dd>
     </dl>
 
@@ -383,9 +410,11 @@
         names on the same host using the same <code>vswitchd</code> instance.
         This may be useful when running a hybrid setup with more than one CMS
         managing ports on the host, or to use different datapath types on the
-        same host. Note that this ability is highly experimental and has known
-        limitations (for example, stateful ACLs are not supported). Use at your
-        own risk.
+        same host. Make sure you also set
+        <code>external_ids:ovn-set-local-ip</code> when using such
+        configuration. Also note that this ability is highly experimental and
+        has known limitations (for example, stateful ACLs are not supported).
+        Use at your own risk.
     </p>
 
     <p>

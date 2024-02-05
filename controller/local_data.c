@@ -22,6 +22,7 @@
 #include "lib/util.h"
 #include "lib/vswitch-idl.h"
 #include "openvswitch/vlog.h"
+#include "socket-util.h"
 
 /* OVN includes. */
 #include "encaps.h"
@@ -54,6 +55,20 @@ static bool datapath_is_switch(const struct sbrec_datapath_binding *);
 static bool datapath_is_transit_switch(const struct sbrec_datapath_binding *);
 
 static uint64_t local_datapath_usage;
+
+/* To be used when hmap_node.hash might be wrong e.g. tunnel_key got updated */
+struct local_datapath *
+get_local_datapath_no_hash(const struct hmap *local_datapaths,
+                           uint32_t tunnel_key)
+{
+    struct local_datapath *ld;
+    HMAP_FOR_EACH (ld, hmap_node, local_datapaths) {
+        if (ld->datapath->tunnel_key == tunnel_key) {
+            return ld;
+        }
+    }
+    return NULL;
+}
 
 struct local_datapath *
 get_local_datapath(const struct hmap *local_datapaths, uint32_t tunnel_key)
@@ -387,7 +402,7 @@ local_nonvif_data_run(const struct ovsrec_bridge *br_int,
                                          "ovn-chassis-id");
         if (tunnel_id && encaps_tunnel_id_match(tunnel_id,
                                                 chassis_rec->name,
-                                                NULL)) {
+                                                NULL, NULL)) {
             continue;
         }
 
@@ -438,7 +453,7 @@ local_nonvif_data_run(const struct ovsrec_bridge *br_int,
                 char *hash_id = NULL;
                 char *ip = NULL;
 
-                if (!encaps_tunnel_id_parse(tunnel_id, &hash_id, &ip)) {
+                if (!encaps_tunnel_id_parse(tunnel_id, &hash_id, &ip, NULL)) {
                     continue;
                 }
                 struct chassis_tunnel *tun = xmalloc(sizeof *tun);
@@ -447,6 +462,7 @@ local_nonvif_data_run(const struct ovsrec_bridge *br_int,
                 tun->chassis_id = xstrdup(tunnel_id);
                 tun->ofport = u16_to_ofp(ofport);
                 tun->type = tunnel_type;
+                tun->is_ipv6 = ip ? addr_is_ipv6(ip) : false;
 
                 free(hash_id);
                 free(ip);
@@ -475,11 +491,10 @@ local_nonvif_data_handle_ovs_iface_changes(
 
 bool
 get_chassis_tunnel_ofport(const struct hmap *chassis_tunnels,
-                          const char *chassis_name, char *encap_ip,
-                          ofp_port_t *ofport)
+                          const char *chassis_name, ofp_port_t *ofport)
 {
     struct chassis_tunnel *tun = NULL;
-    tun = chassis_tunnel_find(chassis_tunnels, chassis_name, encap_ip);
+    tun = chassis_tunnel_find(chassis_tunnels, chassis_name, NULL, NULL);
     if (!tun) {
         return false;
     }
@@ -513,7 +528,7 @@ chassis_tunnels_destroy(struct hmap *chassis_tunnels)
  */
 struct chassis_tunnel *
 chassis_tunnel_find(const struct hmap *chassis_tunnels, const char *chassis_id,
-                    char *encap_ip)
+                    char *remote_encap_ip, const char *local_encap_ip)
 {
     /*
      * If the specific encap_ip is given, look for the chassisid_ip entry,
@@ -522,7 +537,8 @@ chassis_tunnel_find(const struct hmap *chassis_tunnels, const char *chassis_id,
     struct chassis_tunnel *tun = NULL;
     HMAP_FOR_EACH_WITH_HASH (tun, hmap_node, hash_string(chassis_id, 0),
                              chassis_tunnels) {
-        if (encaps_tunnel_id_match(tun->chassis_id, chassis_id, encap_ip)) {
+        if (encaps_tunnel_id_match(tun->chassis_id, chassis_id,
+                                   remote_encap_ip, local_encap_ip)) {
             return tun;
         }
     }
@@ -659,8 +675,24 @@ lb_is_local(const struct sbrec_load_balancer *sbrec_lb,
         }
     }
 
+    /* datapath_group column is deprecated. */
     struct sbrec_logical_dp_group *dp_group = sbrec_lb->datapath_group;
+    for (size_t i = 0; dp_group && i < dp_group->n_datapaths; i++) {
+        if (get_local_datapath(local_datapaths,
+                               dp_group->datapaths[i]->tunnel_key)) {
+            return true;
+        }
+    }
 
+    dp_group = sbrec_lb->ls_datapath_group;
+    for (size_t i = 0; dp_group && i < dp_group->n_datapaths; i++) {
+        if (get_local_datapath(local_datapaths,
+                               dp_group->datapaths[i]->tunnel_key)) {
+            return true;
+        }
+    }
+
+    dp_group = sbrec_lb->lr_datapath_group;
     for (size_t i = 0; dp_group && i < dp_group->n_datapaths; i++) {
         if (get_local_datapath(local_datapaths,
                                dp_group->datapaths[i]->tunnel_key)) {

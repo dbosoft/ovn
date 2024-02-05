@@ -15,9 +15,6 @@
 #ifndef STOPWATCH_NAMES_H
 #define STOPWATCH_NAMES_H 1
 
-/* In order to not duplicate names for stopwatches between ddlog and non-ddlog
- * we define them in a common header file.
- */
 #define NORTHD_LOOP_STOPWATCH_NAME "ovn-northd-loop"
 #define OVNNB_DB_RUN_STOPWATCH_NAME "ovnnb_db_run"
 #define OVNSB_DB_RUN_STOPWATCH_NAME "ovnsb_db_run"
@@ -27,8 +24,15 @@
 #define LFLOWS_DATAPATHS_STOPWATCH_NAME "lflows_datapaths"
 #define LFLOWS_PORTS_STOPWATCH_NAME "lflows_ports"
 #define LFLOWS_LBS_STOPWATCH_NAME "lflows_lbs"
+#define LFLOWS_LR_STATEFUL_STOPWATCH_NAME "lflows_lr_stateful"
+#define LFLOWS_LS_STATEFUL_STOPWATCH_NAME "lflows_ls_stateful"
 #define LFLOWS_IGMP_STOPWATCH_NAME "lflows_igmp"
 #define LFLOWS_DP_GROUPS_STOPWATCH_NAME "lflows_dp_groups"
 #define LFLOWS_TO_SB_STOPWATCH_NAME "lflows_to_sb"
+#define PORT_GROUP_RUN_STOPWATCH_NAME "port_group_run"
+#define SYNC_METERS_RUN_STOPWATCH_NAME "sync_meters_run"
+#define LR_NAT_RUN_STOPWATCH_NAME "lr_nat_run"
+#define LR_STATEFUL_RUN_STOPWATCH_NAME "lr_stateful"
+#define LS_STATEFUL_RUN_STOPWATCH_NAME "ls_stateful"
 
 #endif

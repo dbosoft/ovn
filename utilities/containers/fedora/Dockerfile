@@ -1,4 +1,6 @@
-FROM quay.io/fedora/fedora:37
+FROM quay.io/fedora/fedora:latest
+
+ARG CONTAINERS_PATH
 
 # Update distro, install packages and clean any possible leftovers
 RUN dnf -y update \
@@ -19,7 +21,9 @@ RUN dnf -y update \
         iproute \
         iproute-tc \
         iputils \
+        jemalloc-devel \
         kernel-devel \
+        kmod \
         libcap-ng-devel \
         libtool \
         net-tools \
@@ -50,7 +54,7 @@ RUN git clone git://git.kernel.org/pub/scm/devel/sparse/sparse.git \
 
 WORKDIR /workspace
 
-COPY py-requirements.txt /tmp/py-requirements.txt
+COPY $CONTAINERS_PATH/py-requirements.txt /tmp/py-requirements.txt
 
 # Update and install pip dependencies
 RUN python3 -m pip install --upgrade pip \

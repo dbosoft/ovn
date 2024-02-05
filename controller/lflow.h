@@ -63,33 +63,44 @@ struct uuid;
  *
  * These are heavily documented in ovn-architecture(7), please update it if
  * you make any changes. */
-#define OFTABLE_PHY_TO_LOG            0
-#define OFTABLE_LOG_INGRESS_PIPELINE  8 /* First of LOG_PIPELINE_LEN tables. */
-#define OFTABLE_REMOTE_OUTPUT        37
-#define OFTABLE_LOCAL_OUTPUT         38
-#define OFTABLE_CHECK_LOOPBACK       39
-#define OFTABLE_LOG_EGRESS_PIPELINE  40 /* First of LOG_PIPELINE_LEN tables. */
-#define OFTABLE_SAVE_INPORT          64
-#define OFTABLE_LOG_TO_PHY           65
-#define OFTABLE_MAC_BINDING          66
-#define OFTABLE_MAC_LOOKUP           67
-#define OFTABLE_CHK_LB_HAIRPIN       68
-#define OFTABLE_CHK_LB_HAIRPIN_REPLY 69
-#define OFTABLE_CT_SNAT_HAIRPIN      70
-#define OFTABLE_GET_FDB              71
-#define OFTABLE_LOOKUP_FDB           72
-#define OFTABLE_CHK_IN_PORT_SEC      73
-#define OFTABLE_CHK_IN_PORT_SEC_ND   74
-#define OFTABLE_CHK_OUT_PORT_SEC     75
-#define OFTABLE_ECMP_NH_MAC          76
-#define OFTABLE_ECMP_NH              77
-#define OFTABLE_CHK_LB_AFFINITY      78
+#define OFTABLE_PHY_TO_LOG                0
+
+/* Start of LOG_PIPELINE_LEN tables. */
+#define OFTABLE_LOG_INGRESS_PIPELINE      8
+#define OFTABLE_OUTPUT_LARGE_PKT_DETECT  37
+#define OFTABLE_OUTPUT_LARGE_PKT_PROCESS 38
+#define OFTABLE_REMOTE_OUTPUT            39
+#define OFTABLE_LOCAL_OUTPUT             40
+#define OFTABLE_CHECK_LOOPBACK           41
+
+/* Start of the OUTPUT section of the pipeline. */
+#define OFTABLE_OUTPUT_INIT OFTABLE_OUTPUT_LARGE_PKT_DETECT
+
+/* Start of LOG_PIPELINE_LEN tables. */
+#define OFTABLE_LOG_EGRESS_PIPELINE      42
+#define OFTABLE_SAVE_INPORT              64
+#define OFTABLE_LOG_TO_PHY               65
+#define OFTABLE_MAC_BINDING              66
+#define OFTABLE_MAC_LOOKUP               67
+#define OFTABLE_CHK_LB_HAIRPIN           68
+#define OFTABLE_CHK_LB_HAIRPIN_REPLY     69
+#define OFTABLE_CT_SNAT_HAIRPIN          70
+#define OFTABLE_GET_FDB                  71
+#define OFTABLE_LOOKUP_FDB               72
+#define OFTABLE_CHK_IN_PORT_SEC          73
+#define OFTABLE_CHK_IN_PORT_SEC_ND       74
+#define OFTABLE_CHK_OUT_PORT_SEC         75
+#define OFTABLE_ECMP_NH_MAC              76
+#define OFTABLE_ECMP_NH                  77
+#define OFTABLE_CHK_LB_AFFINITY          78
+#define OFTABLE_MAC_CACHE_USE            79
 
 struct lflow_ctx_in {
     struct ovsdb_idl_index *sbrec_multicast_group_by_name_datapath;
     struct ovsdb_idl_index *sbrec_logical_flow_by_logical_datapath;
     struct ovsdb_idl_index *sbrec_logical_flow_by_logical_dp_group;
     struct ovsdb_idl_index *sbrec_port_binding_by_name;
+    struct ovsdb_idl_index *sbrec_port_binding_by_key;
     struct ovsdb_idl_index *sbrec_fdb_by_dp_key;
     struct ovsdb_idl_index *sbrec_mac_binding_by_datapath;
     struct ovsdb_idl_index *sbrec_static_mac_binding_by_datapath;
@@ -117,6 +128,8 @@ struct lflow_ctx_in {
     const struct flow_collector_ids *collector_ids;
     const struct hmap *local_lbs;
     bool lb_hairpin_use_ct_mark;
+    bool localnet_learn_fdb;
+    bool localnet_learn_fdb_changed;
 };
 
 struct lflow_ctx_out {

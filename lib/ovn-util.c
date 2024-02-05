@@ -305,36 +305,26 @@ bool
 extract_lrp_networks(const struct nbrec_logical_router_port *lrp,
                      struct lport_addresses *laddrs)
 {
-    return extract_lrp_networks__(lrp->mac, lrp->networks, lrp->n_networks,
-                                  laddrs);
-}
-
-/* Separate out the body of 'extract_lrp_networks()' for use from DDlog,
- * which does not know the 'nbrec_logical_router_port' type. */
-bool
-extract_lrp_networks__(char *mac, char **networks, size_t n_networks,
-                       struct lport_addresses *laddrs)
-{
     memset(laddrs, 0, sizeof *laddrs);
 
-    if (!eth_addr_from_string(mac, &laddrs->ea)) {
+    if (!eth_addr_from_string(lrp->mac, &laddrs->ea)) {
         laddrs->ea = eth_addr_zero;
         return false;
     }
     snprintf(laddrs->ea_s, sizeof laddrs->ea_s, ETH_ADDR_FMT,
              ETH_ADDR_ARGS(laddrs->ea));
 
-    for (int i = 0; i < n_networks; i++) {
+    for (int i = 0; i < lrp->n_networks; i++) {
         ovs_be32 ip4;
         struct in6_addr ip6;
         unsigned int plen;
         char *error;
 
-        error = ip_parse_cidr(networks[i], &ip4, &plen);
+        error = ip_parse_cidr(lrp->networks[i], &ip4, &plen);
         if (!error) {
             if (!ip4) {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
-                VLOG_WARN_RL(&rl, "bad 'networks' %s", networks[i]);
+                VLOG_WARN_RL(&rl, "bad 'networks' %s", lrp->networks[i]);
                 continue;
             }
 
@@ -343,13 +333,13 @@ extract_lrp_networks__(char *mac, char **networks, size_t n_networks,
         }
         free(error);
 
-        error = ipv6_parse_cidr(networks[i], &ip6, &plen);
+        error = ipv6_parse_cidr(lrp->networks[i], &ip6, &plen);
         if (!error) {
             add_ipv6_netaddr(laddrs, ip6, plen);
         } else {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
             VLOG_INFO_RL(&rl, "invalid syntax '%s' in networks",
-                         networks[i]);
+                         lrp->networks[i]);
             free(error);
         }
     }
@@ -395,9 +385,15 @@ extract_sbrec_binding_first_mac(const struct sbrec_port_binding *binding,
 }
 
 bool
-lport_addresses_is_empty(struct lport_addresses *laddrs)
+lport_addresses_is_empty(const struct lport_addresses *laddrs)
 {
     return !laddrs->n_ipv4_addrs && !laddrs->n_ipv6_addrs;
+}
+
+void
+init_lport_addresses(struct lport_addresses *laddrs)
+{
+    *laddrs = (struct lport_addresses) { 0 };
 }
 
 void
@@ -485,9 +481,9 @@ split_addresses(const char *addresses, struct svec *ipv4_addrs,
  *
  * It is the caller's responsibility to free the allocated memory. */
 char *
-alloc_nat_zone_key(const struct uuid *key, const char *type)
+alloc_nat_zone_key(const char *name, const char *type)
 {
-    return xasprintf(UUID_FMT"_%s", UUID_ARGS(key), type);
+    return xasprintf("%s_%s", name, type);
 }
 
 const char *
@@ -626,13 +622,10 @@ ovn_pipeline_from_name(const char *pipeline)
 uint32_t
 sbrec_logical_flow_hash(const struct sbrec_logical_flow *lf)
 {
-    const struct sbrec_datapath_binding *ld = lf->logical_datapath;
-    uint32_t hash = ovn_logical_flow_hash(lf->table_id,
-                                          ovn_pipeline_from_name(lf->pipeline),
-                                          lf->priority, lf->match,
-                                          lf->actions);
-
-    return ld ? ovn_logical_flow_hash_datapath(&ld->header_.uuid, hash) : hash;
+    return ovn_logical_flow_hash(lf->table_id,
+                                 ovn_pipeline_from_name(lf->pipeline),
+                                 lf->priority, lf->match,
+                                 lf->actions);
 }
 
 uint32_t
@@ -643,13 +636,6 @@ ovn_logical_flow_hash(uint8_t table_id, enum ovn_pipeline pipeline,
     size_t hash = hash_2words((table_id << 16) | priority, pipeline);
     hash = hash_string(match, hash);
     return hash_string(actions, hash);
-}
-
-uint32_t
-ovn_logical_flow_hash_datapath(const struct uuid *logical_datapath,
-                               uint32_t hash)
-{
-    return hash_add(hash, uuid_hash(logical_datapath));
 }
 
 
@@ -720,6 +706,21 @@ ovn_allocate_tnlid(struct hmap *set, const char *name, uint32_t min,
     return 0;
 }
 
+bool
+ovn_free_tnlid(struct hmap *tnlids, uint32_t tnlid)
+{
+    uint32_t hash = hash_int(tnlid, 0);
+    struct tnlid_node *node;
+    HMAP_FOR_EACH_IN_BUCKET (node, hmap_node, hash, tnlids) {
+        if (node->tnlid == tnlid) {
+            hmap_remove(tnlids, &node->hmap_node);
+            free(node);
+            return true;
+        }
+    }
+    return false;
+}
+
 char *
 ovn_chassis_redirect_name(const char *port_name)
 {
@@ -743,6 +744,18 @@ ip46_parse_cidr(const char *str, struct in6_addr *prefix, unsigned int *plen)
     }
     free(error);
     return false;
+}
+
+bool
+ip46_parse(const char *ip_str, struct in6_addr *ip)
+{
+    ovs_be32 ipv4;
+    if (ip_parse(ip_str, &ipv4)) {
+        *ip = in6_addr_mapped_ipv4(ipv4);
+        return true;
+    }
+
+    return ipv6_parse(ip_str, ip);
 }
 
 /* The caller must free the returned string. */
@@ -798,26 +811,6 @@ str_tolower(const char *orig)
     return copy;
 }
 
-/* This is a wrapper function which get the value associated with 'key' in
- * 'smap' and converts it to an unsigned int. If 'key' is not in 'smap' or a
- * valid unsigned integer can't be parsed from it's value, returns 'def'.
- *
- * Note: Remove this function once OpenvSwitch library (lib/smap.h) has this
- * helper function.
- */
-unsigned int
-ovn_smap_get_uint(const struct smap *smap, const char *key, unsigned int def)
-{
-    const char *value = smap_get(smap, key);
-    unsigned int u_value;
-
-    if (!value || !str_to_uint(value, 10, &u_value)) {
-        return def;
-    }
-
-    return u_value;
-}
-
 /* For a 'key' of the form "IP:port" or just "IP", sets 'port',
  * 'ip_address' and 'ip' ('struct in6_addr' IPv6 or IPv4 mapped address).
  * The caller must free() the memory allocated for 'ip_address'.
@@ -861,21 +854,6 @@ ovn_get_internal_version(void)
                      sbrec_get_db_version(),
                      N_OVNACTS, OVN_INTERNAL_MINOR_VER);
 }
-
-#ifdef DDLOG
-/* Callbacks used by the ddlog northd code to print warnings and errors. */
-void
-ddlog_warn(const char *msg)
-{
-    VLOG_WARN("%s", msg);
-}
-
-void
-ddlog_err(const char *msg)
-{
-    VLOG_ERR("%s", msg);
-}
-#endif
 
 uint32_t
 get_tunnel_type(const char *name)
@@ -1113,4 +1091,196 @@ void flow_collector_ids_clear(struct flow_collector_ids *ids)
 {
     flow_collector_ids_destroy(ids);
     flow_collector_ids_init(ids);
+}
+
+char *
+encode_fqdn_string(const char *fqdn, size_t *len)
+{
+
+    size_t domain_len = strlen(fqdn);
+    *len = domain_len + 2;
+    char *encoded = xzalloc(*len);
+
+    int8_t label_len = 0;
+    for (size_t i = 0; i < domain_len; i++) {
+        if (fqdn[i] == '.') {
+            encoded[i - label_len] = label_len;
+            label_len = 0;
+        } else {
+            encoded[i + 1] = fqdn[i];
+            label_len++;
+        }
+    }
+
+    /* This is required for the last label if it doesn't end with '.' */
+    if (label_len) {
+        encoded[domain_len - label_len] = label_len;
+    }
+
+    return encoded;
+}
+
+static bool
+is_lport_vif(const struct sbrec_port_binding *pb)
+{
+    return !pb->type[0];
+}
+
+enum en_lport_type
+get_lport_type(const struct sbrec_port_binding *pb)
+{
+    if (is_lport_vif(pb)) {
+        if (pb->parent_port && pb->parent_port[0]) {
+            return LP_CONTAINER;
+        }
+        return LP_VIF;
+    } else if (!strcmp(pb->type, "patch")) {
+        return LP_PATCH;
+    } else if (!strcmp(pb->type, "chassisredirect")) {
+        return LP_CHASSISREDIRECT;
+    } else if (!strcmp(pb->type, "l3gateway")) {
+        return LP_L3GATEWAY;
+    } else if (!strcmp(pb->type, "localnet")) {
+        return LP_LOCALNET;
+    } else if (!strcmp(pb->type, "localport")) {
+        return LP_LOCALPORT;
+    } else if (!strcmp(pb->type, "l2gateway")) {
+        return LP_L2GATEWAY;
+    } else if (!strcmp(pb->type, "virtual")) {
+        return LP_VIRTUAL;
+    } else if (!strcmp(pb->type, "external")) {
+        return LP_EXTERNAL;
+    } else if (!strcmp(pb->type, "remote")) {
+        return LP_REMOTE;
+    } else if (!strcmp(pb->type, "vtep")) {
+        return LP_VTEP;
+    }
+
+    return LP_UNKNOWN;
+}
+
+char *
+get_lport_type_str(enum en_lport_type lport_type)
+{
+    switch (lport_type) {
+    case LP_VIF:
+        return "VIF";
+    case LP_CONTAINER:
+        return "CONTAINER";
+    case LP_VIRTUAL:
+        return "VIRTUAL";
+    case LP_PATCH:
+        return "PATCH";
+    case LP_CHASSISREDIRECT:
+        return "CHASSISREDIRECT";
+    case LP_L3GATEWAY:
+        return "L3GATEWAY";
+    case LP_LOCALNET:
+        return "LOCALNET";
+    case LP_LOCALPORT:
+        return "LOCALPORT";
+    case LP_L2GATEWAY:
+        return "L2GATEWAY";
+    case LP_EXTERNAL:
+        return "EXTERNAL";
+    case LP_REMOTE:
+        return "REMOTE";
+    case LP_VTEP:
+        return "VTEP";
+    case LP_UNKNOWN:
+        return "UNKNOWN";
+    }
+
+    OVS_NOT_REACHED();
+}
+
+bool
+is_pb_router_type(const struct sbrec_port_binding *pb)
+{
+    enum en_lport_type lport_type = get_lport_type(pb);
+
+    switch (lport_type) {
+    case LP_PATCH:
+    case LP_CHASSISREDIRECT:
+    case LP_L3GATEWAY:
+    case LP_L2GATEWAY:
+        return true;
+
+    case LP_VIF:
+    case LP_CONTAINER:
+    case LP_VIRTUAL:
+    case LP_LOCALNET:
+    case LP_LOCALPORT:
+    case LP_REMOTE:
+    case LP_VTEP:
+    case LP_EXTERNAL:
+    case LP_UNKNOWN:
+        return false;
+    }
+
+    return false;
+}
+
+void
+sorted_array_apply_diff(const struct sorted_array *a1,
+                        const struct sorted_array *a2,
+                        void (*apply_callback)(const void *arg,
+                                               const char *item,
+                                               bool add),
+                        const void *arg)
+{
+    size_t idx1, idx2;
+
+    for (idx1 = idx2 = 0; idx1 < a1->n && idx2 < a2->n;) {
+        int cmp = strcmp(a1->arr[idx1], a2->arr[idx2]);
+        if (cmp < 0) {
+            apply_callback(arg, a1->arr[idx1], true);
+            idx1++;
+        } else if (cmp > 0) {
+            apply_callback(arg, a2->arr[idx2], false);
+            idx2++;
+        } else {
+            idx1++;
+            idx2++;
+        }
+    }
+
+    for (; idx1 < a1->n; idx1++) {
+        apply_callback(arg, a1->arr[idx1], true);
+    }
+
+    for (; idx2 < a2->n; idx2++) {
+        apply_callback(arg, a2->arr[idx2], false);
+    }
+}
+
+/* Call for the unixctl command that will store the connection and
+ * set the appropriate conditions. */
+void
+ovn_exit_command_callback(struct unixctl_conn *conn, int argc,
+                          const char *argv[], void *exit_args_)
+{
+    struct ovn_exit_args *exit_args = exit_args_;
+
+    exit_args->n_conns++;
+    exit_args->conns = xrealloc(exit_args->conns,
+                                exit_args->n_conns * sizeof *exit_args->conns);
+
+    exit_args->exiting = true;
+    exit_args->conns[exit_args->n_conns - 1] = conn;
+
+    if (!exit_args->restart) {
+        exit_args->restart = argc == 2 && !strcmp(argv[1], "--restart");
+    }
+}
+
+/* Reply to all waiting unixctl connections and free the connection array.
+ * This function should be called after the heaviest cleanup has finished. */
+void
+ovn_exit_args_finish(struct ovn_exit_args *exit_args)
+{
+    for (size_t i = 0; i < exit_args->n_conns; i++) {
+        unixctl_command_reply(exit_args->conns[i], NULL);
+    }
+    free(exit_args->conns);
 }

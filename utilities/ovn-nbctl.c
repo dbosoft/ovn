@@ -48,6 +48,7 @@
 #include "unixctl.h"
 #include "util.h"
 #include "openvswitch/vlog.h"
+#include "bitmap.h"
 
 VLOG_DEFINE_THIS_MODULE(nbctl);
 
@@ -122,7 +123,9 @@ nbctl_post_execute(struct ovsdb_idl *idl, struct ovsdb_idl_txn *txn,
             int64_t cur_cfg = (wait_type == NBCTL_WAIT_SB
                                ? nb->sb_cfg
                                : MIN(nb->sb_cfg, nb->hv_cfg));
-            if (cur_cfg >= next_cfg) {
+            /* Detect if overflows happened within the cfg update. */
+            int64_t delta = cur_cfg - next_cfg;
+            if (cur_cfg >= next_cfg && delta < INT32_MAX) {
                 if (print_wait_time) {
                     printf("Time spent on processing nb_cfg %"PRId64":\n",
                            next_cfg);
@@ -151,6 +154,20 @@ nbctl_post_execute(struct ovsdb_idl *idl, struct ovsdb_idl_txn *txn,
             return xstrdup("timeout expired");
         }
     }
+}
+
+static int
+get_inactivity_probe(struct ovsdb_idl *idl)
+{
+    const struct nbrec_nb_global *nb = nbrec_nb_global_first(idl);
+    int interval = DEFAULT_UTILS_PROBE_INTERVAL_MSEC;
+
+    if (nb) {
+        interval = smap_get_int(&nb->options, "nbctl_probe_interval",
+                                interval);
+    }
+
+    return interval;
 }
 
 static char * OVS_WARN_UNUSED_RESULT dhcp_options_get(
@@ -266,22 +283,24 @@ ACL commands:\n\
                             print ACLs for SWITCH\n\
 \n\
 QoS commands:\n\
-  qos-add SWITCH DIRECTION PRIORITY MATCH [rate=RATE [burst=BURST]] [dscp=DSCP]\n\
+  qos-add SWITCH DIRECTION PRIORITY MATCH [rate=RATE [burst=BURST]] [dscp=DSCP] [mark=MARK]\n\
                             add an QoS rule to SWITCH\n\
   qos-del SWITCH [{DIRECTION | UUID} [PRIORITY MATCH]]\n\
                             remove QoS rules from SWITCH\n\
   qos-list SWITCH           print QoS rules for SWITCH\n\
 \n\
 Mirror commands:\n\
-  mirror-add NAME TYPE INDEX FILTER IP\n\
+  mirror-add NAME TYPE [INDEX] FILTER {IP | MIRROR-ID} \n\
                             add a mirror with given name\n\
-                            specify TYPE 'gre' or 'erspan'\n\
+                            specify TYPE 'gre', 'erspan', or 'local'\n\
                             specify the tunnel INDEX value\n\
                                 (indicates key if GRE\n\
                                  erpsan_idx if ERSPAN)\n\
                             specify FILTER for mirroring selection\n\
-                                'to-lport' / 'from-lport'\n\
-                            specify Sink / Destination i.e. Remote IP\n\
+                                'to-lport' / 'from-lport' / 'both'\n\
+                            specify Sink / Destination i.e. Remote IP, or a\n\
+                                local interface with external-ids:mirror-id\n\
+                                matching MIRROR-ID\n\
   mirror-del [NAME]         remove mirrors\n\
   mirror-list               print mirrors\n\
 \n\
@@ -445,9 +464,10 @@ Port group commands:\n\
   pg-set-ports PG PORTS       Set PORTS on port group PG\n\
   pg-del PG                   Delete port group PG\n\
 HA chassis group commands:\n\
-  ha-chassis-group-add GRP  Create an HA chassis group GRP\n\
-  ha-chassis-group-del GRP  Delete the HA chassis group GRP\n\
-  ha-chassis-group-list     List the HA chassis groups\n\
+  ha-chassis-group-add GRP    Create an HA chassis group GRP\n\
+  ha-chassis-group-del GRP    Delete the HA chassis group GRP\n\
+  ha-chassis-group-list [GRP] Print the supplied HA chassis group or all\n\
+                              if none supplied\n\
   ha-chassis-group-add-chassis GRP CHASSIS PRIORITY Adds an HA\
 chassis with mandatory PRIORITY to the HA chassis group GRP\n\
   ha-chassis-group-remove-chassis GRP CHASSIS Removes the HA chassis\
@@ -2100,6 +2120,8 @@ acl_cmp(const void *acl1_, const void *acl2_)
         return after_lb2 ? -1 : 1;
     } else if (acl1->priority != acl2->priority) {
         return acl1->priority > acl2->priority ? -1 : 1;
+    } else if (acl1->tier != acl2->tier) {
+        return acl1->tier > acl2->tier ? -1 : 1;
     } else {
         return strcmp(acl1->match, acl2->match);
     }
@@ -2283,6 +2305,7 @@ nbctl_pre_acl(struct ctl_context *ctx)
     ovsdb_idl_add_column(ctx->idl, &nbrec_acl_col_priority);
     ovsdb_idl_add_column(ctx->idl, &nbrec_acl_col_match);
     ovsdb_idl_add_column(ctx->idl, &nbrec_acl_col_options);
+    ovsdb_idl_add_column(ctx->idl, &nbrec_acl_col_tier);
 }
 
 static void
@@ -2328,7 +2351,7 @@ nbctl_acl_add(struct ctl_context *ctx)
     /* Validate action. */
     if (strcmp(action, "allow") && strcmp(action, "allow-related")
         && strcmp(action, "allow-stateless") && strcmp(action, "drop")
-        && strcmp(action, "reject")) {
+        && strcmp(action, "reject") && strcmp(action, "pass")) {
         ctl_error(ctx, "%s: action must be one of \"allow\", "
                   "\"allow-related\", \"allow-stateless\", \"drop\", "
                   "and \"reject\"", action);
@@ -2390,6 +2413,16 @@ nbctl_acl_add(struct ctl_context *ctx)
         nbrec_acl_set_options(acl, &options);
     }
 
+    const char *tier_s = shash_find_data(&ctx->options, "--tier");
+    if (tier_s) {
+        long tier;
+        if (!str_to_long(tier_s, 10, &tier)) {
+            ctl_error(ctx, "Invalid tier %s", tier_s);
+            return;
+        }
+        nbrec_acl_set_tier(acl, tier);
+    }
+
     /* Check if same acl already exists for the ls/portgroup */
     size_t n_acls = pg ? pg->n_acls : ls->n_acls;
     struct nbrec_acl **acls = pg ? pg->acls : ls->acls;
@@ -2418,6 +2451,10 @@ nbctl_acl_del(struct ctl_context *ctx)
 {
     const struct nbrec_logical_switch *ls = NULL;
     const struct nbrec_port_group *pg = NULL;
+    const char *tier_s = shash_find_data(&ctx->options, "--tier");
+    long tier;
+    unsigned long *bitmaps[3];
+    size_t n_bitmaps = 0;
 
     char *error = acl_cmd_get_pg_or_ls(ctx, &ls, &pg);
     if (error) {
@@ -2425,8 +2462,13 @@ nbctl_acl_del(struct ctl_context *ctx)
         return;
     }
 
-    if (ctx->argc == 2) {
-        /* If direction, priority, and match are not specified, delete
+    if (tier_s && !str_to_long(tier_s, 10, &tier)) {
+        ctl_error(ctx, "Invalid tier %s", tier_s);
+        return;
+    }
+
+    if (ctx->argc == 2 && !tier_s) {
+        /* If direction, priority, tier, and match are not specified, delete
          * all ACLs. */
         if (pg) {
             nbrec_port_group_verify_acls(pg);
@@ -2438,55 +2480,83 @@ nbctl_acl_del(struct ctl_context *ctx)
         return;
     }
 
-    const char *direction;
-    error = parse_direction(ctx->argv[2], &direction);
-    if (error) {
-        ctx->error = error;
-        return;
-    }
-
     size_t n_acls = pg ? pg->n_acls : ls->n_acls;
     struct nbrec_acl **acls = pg ? pg->acls : ls->acls;
-    /* If priority and match are not specified, delete all ACLs with the
-     * specified direction. */
-    if (ctx->argc == 3) {
+
+    if (tier_s) {
+        bitmaps[n_bitmaps] = bitmap_allocate(n_acls);
+        for (size_t i = 0; i < n_acls; i++) {
+            if (acls[i]->tier == tier) {
+                bitmap_set1(bitmaps[n_bitmaps], i);
+            }
+        }
+        n_bitmaps++;
+    }
+
+    if (ctx->argc >= 3) {
+        const char *direction;
+        error = parse_direction(ctx->argv[2], &direction);
+        if (error) {
+            ctx->error = error;
+            goto cleanup;
+        }
+
+        /* If priority and match are not specified, delete all ACLs with the
+         * specified direction. */
+        bitmaps[n_bitmaps] = bitmap_allocate(n_acls);
         for (size_t i = 0; i < n_acls; i++) {
             if (!strcmp(direction, acls[i]->direction)) {
-                if (pg) {
-                    nbrec_port_group_update_acls_delvalue(pg, acls[i]);
-                } else {
-                    nbrec_logical_switch_update_acls_delvalue(ls, acls[i]);
-                }
+                bitmap_set1(bitmaps[n_bitmaps], i);
             }
         }
-        return;
+        n_bitmaps++;
     }
 
-    int64_t priority;
-    error = parse_priority(ctx->argv[3], &priority);
-    if (error) {
-        ctx->error = error;
-        return;
-    }
-
-    if (ctx->argc == 4) {
-        ctl_error(ctx, "cannot specify priority without match");
-        return;
-    }
-
-    /* Remove the matching rule. */
-    for (size_t i = 0; i < n_acls; i++) {
-        struct nbrec_acl *acl = acls[i];
-
-        if (priority == acl->priority && !strcmp(ctx->argv[4], acl->match) &&
-             !strcmp(direction, acl->direction)) {
-            if (pg) {
-                nbrec_port_group_update_acls_delvalue(pg, acl);
-            } else {
-                nbrec_logical_switch_update_acls_delvalue(ls, acl);
-            }
-            return;
+    if (ctx->argc >= 4) {
+        int64_t priority;
+        error = parse_priority(ctx->argv[3], &priority);
+        if (error) {
+            ctx->error = error;
+            goto cleanup;
         }
+
+        if (ctx->argc == 4) {
+            ctl_error(ctx, "cannot specify priority without match");
+            goto cleanup;
+        }
+
+        /* Remove the matching rule. */
+        bitmaps[n_bitmaps] = bitmap_allocate(n_acls);
+        for (size_t i = 0; i < n_acls; i++) {
+            struct nbrec_acl *acl = acls[i];
+
+            if (priority == acl->priority &&
+                !strcmp(ctx->argv[4], acl->match)) {
+                bitmap_set1(bitmaps[n_bitmaps], i);
+            }
+        }
+        n_bitmaps++;
+    }
+
+    unsigned long *bitmap_result = bitmap_allocate1(n_acls);
+    for (size_t i = 0; i < n_bitmaps; i++) {
+        bitmap_result = bitmap_and(bitmap_result, bitmaps[i], n_acls);
+    }
+
+    size_t index;
+    BITMAP_FOR_EACH_1 (index, n_acls, bitmap_result) {
+        if (pg) {
+            nbrec_port_group_update_acls_delvalue(pg, acls[index]);
+        } else {
+            nbrec_logical_switch_update_acls_delvalue(ls, acls[index]);
+        }
+    }
+
+    free(bitmap_result);
+
+cleanup:
+    for (size_t i = 0; i < n_bitmaps; i++) {
+        free(bitmaps[i]);
     }
 }
 
@@ -2544,6 +2614,9 @@ nbctl_qos_list(struct ctl_context *ctx)
             if (!strcmp(qos_rule->key_action[j], "dscp")) {
                 ds_put_format(&ctx->output, " dscp=%"PRId64"",
                               qos_rule->value_action[j]);
+            } else if (!strcmp(qos_rule->key_action[j], "mark")) {
+                ds_put_format(&ctx->output, " mark=%"PRId64"",
+                              qos_rule->value_action[j]);
             }
         }
         ds_put_cstr(&ctx->output, "\n");
@@ -2561,6 +2634,7 @@ nbctl_pre_qos_add(struct ctl_context *ctx)
     ovsdb_idl_add_column(ctx->idl, &nbrec_qos_col_direction);
     ovsdb_idl_add_column(ctx->idl, &nbrec_qos_col_priority);
     ovsdb_idl_add_column(ctx->idl, &nbrec_qos_col_match);
+    ovsdb_idl_add_column(ctx->idl, &nbrec_qos_col_action);
 }
 
 static void
@@ -2570,6 +2644,7 @@ nbctl_qos_add(struct ctl_context *ctx)
     const char *direction;
     int64_t priority;
     int64_t dscp = -1;
+    int64_t mark = 0;
     int64_t rate = 0;
     int64_t burst = 0;
     char *error;
@@ -2599,6 +2674,13 @@ nbctl_qos_add(struct ctl_context *ctx)
                 return;
             }
         }
+        else if (!strncmp(ctx->argv[i], "mark=", 5)) {
+            if (!ovs_scan(ctx->argv[i] + 5, "%"SCNd64, &mark) || mark < 0) {
+                ctl_error(ctx, "%s: mark must be a positive integer",
+                          ctx->argv[i] + 5);
+                return;
+            }
+        }
         else if (!strncmp(ctx->argv[i], "rate=", 5)) {
             if (!ovs_scan(ctx->argv[i] + 5, "%"SCNd64, &rate)
                 || rate < 1 || rate > UINT32_MAX) {
@@ -2616,14 +2698,15 @@ nbctl_qos_add(struct ctl_context *ctx)
             }
         } else {
             ctl_error(ctx, "%s: supported arguments are \"dscp=\", \"rate=\", "
-                      "and \"burst=\"", ctx->argv[i]);
+                      "\"burst=\" and \"mark=\"", ctx->argv[i]);
             return;
         }
     }
 
     /* Validate rate and dscp. */
-    if (-1 == dscp && !rate) {
-        ctl_error(ctx, "Either \"rate\" and/or \"dscp\" must be specified");
+    if (-1 == dscp && !rate && !mark) {
+        ctl_error(ctx, "Either \"mark\", \"rate\" and/or \"dscp\" must be "
+                       "specified");
         return;
     }
 
@@ -2632,9 +2715,11 @@ nbctl_qos_add(struct ctl_context *ctx)
     nbrec_qos_set_priority(qos, priority);
     nbrec_qos_set_direction(qos, direction);
     nbrec_qos_set_match(qos, ctx->argv[4]);
+    if (mark) {
+        nbrec_qos_update_action_setkey(qos, "mark", mark);
+    }
     if (-1 != dscp) {
-        const char *dscp_key = "dscp";
-        nbrec_qos_set_action(qos, &dscp_key, &dscp, 1);
+        nbrec_qos_update_action_setkey(qos, "dscp", dscp);
     }
     if (rate) {
         const char *bandwidth_key[2] = {"rate", "burst"};
@@ -3944,14 +4029,26 @@ normalize_addr_str(const char *orig_addr)
     return ret;
 }
 
+static bool
+ip_in_lrp_networks(const struct nbrec_logical_router_port *lrp,
+                   const char *ip_s);
+
 static void
 nbctl_pre_lr_policy_add(struct ctl_context *ctx)
 {
     ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_col_name);
+    ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_col_ports);
     ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_col_policies);
+
+    ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_port_col_name);
+    ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_port_col_mac);
+    ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_port_col_networks);
 
     ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_policy_col_priority);
     ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_policy_col_match);
+
+    ovsdb_idl_add_column(ctx->idl, &nbrec_bfd_col_dst_ip);
+    ovsdb_idl_add_column(ctx->idl, &nbrec_bfd_col_logical_port);
 }
 
 static void
@@ -4088,6 +4185,81 @@ nbctl_lr_policy_add(struct ctl_context *ctx)
 
     nbrec_logical_router_update_policies_addvalue(lr, policy);
 
+    struct shash_node *bfd = shash_find(&ctx->options, "--bfd");
+    const struct nbrec_bfd **bfd_sessions = NULL;
+
+    if (bfd) {
+        if (!reroute) {
+            ctl_error(ctx, "BFD is valid only with reroute action.");
+            goto free_nexthops;
+        }
+
+        bfd_sessions = xcalloc(n_nexthops, sizeof *bfd_sessions);
+        size_t j, n_bfd_sessions = 0;
+
+        for (i = 0; i < n_nexthops; i++) {
+            for (j = 0; j < lr->n_ports; j++) {
+                if (ip_in_lrp_networks(lr->ports[j], nexthops[i])) {
+                    break;
+                }
+            }
+
+            if (j == lr->n_ports) {
+                ctl_error(ctx, "out lrp not found for %s nexthop",
+                          nexthops[i]);
+                goto free_nexthops;
+            }
+
+            struct in6_addr nexthop_v6;
+            bool is_nexthop_v6 = ipv6_parse(nexthops[i], &nexthop_v6);
+            const struct nbrec_bfd *iter, *nb_bt = NULL;
+
+            NBREC_BFD_FOR_EACH (iter, ctx->idl) {
+                struct in6_addr dst_ipv6;
+                bool is_dst_v6 = ipv6_parse(iter->dst_ip, &dst_ipv6);
+
+                if (is_nexthop_v6 ^ is_dst_v6) {
+                    continue;
+                }
+
+                /* match endpoint ip. */
+                if ((is_nexthop_v6 &&
+                     !ipv6_addr_equals(&nexthop_v6, &dst_ipv6)) ||
+                    strcmp(iter->dst_ip, nexthops[i])) {
+                    continue;
+                }
+
+                /* match outport. */
+                if (strcmp(iter->logical_port, lr->ports[j]->name)) {
+                    continue;
+                }
+
+                nb_bt = iter;
+                break;
+            }
+
+            /* Create the BFD session if it does not already exist. */
+            if (!nb_bt) {
+                nb_bt = nbrec_bfd_insert(ctx->txn);
+                nbrec_bfd_set_dst_ip(nb_bt, nexthops[i]);
+                nbrec_bfd_set_logical_port(nb_bt, lr->ports[j]->name);
+            }
+
+            for (j = 0; j < n_bfd_sessions; j++) {
+                if (bfd_sessions[j] == nb_bt) {
+                    break;
+                }
+            }
+            if (j == n_bfd_sessions) {
+                bfd_sessions[n_bfd_sessions++] = nb_bt;
+            }
+        }
+        nbrec_logical_router_policy_set_bfd_sessions(
+                policy, (struct nbrec_bfd **) bfd_sessions, n_bfd_sessions);
+    }
+
+free_nexthops:
+    free(bfd_sessions);
     for (i = 0; i < n_nexthops; i++) {
         free(nexthops[i]);
     }
@@ -4204,8 +4376,7 @@ print_routing_policy(const struct nbrec_logical_router_policy *policy,
                       policy->match, policy->action);
         for (int i = 0; i < policy->n_nexthops; i++) {
             char *next_hop = normalize_prefix_str(policy->nexthops[i]);
-            char *fmt = i ? ", %s" : " %25s";
-            ds_put_format(s, fmt, next_hop);
+            ds_put_format(s, i ? ", %s" : " %25s", next_hop ? next_hop : "");
             free(next_hop);
         }
     } else {
@@ -4213,8 +4384,11 @@ print_routing_policy(const struct nbrec_logical_router_policy *policy,
                       policy->match, policy->action);
     }
 
-    if (!smap_is_empty(&policy->options)) {
+    if (!smap_is_empty(&policy->options) || policy->n_bfd_sessions) {
         ds_put_format(s, "%15s", "");
+        if (policy->n_bfd_sessions) {
+            ds_put_cstr(s, "bfd,");
+        }
         struct smap_node *node;
         SMAP_FOR_EACH (node, &policy->options) {
             ds_put_format(s, "%s=%s,", node->key, node->value);
@@ -4236,6 +4410,8 @@ nbctl_pre_lr_policy_list(struct ctl_context *ctx)
     ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_policy_col_nexthops);
     ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_policy_col_action);
     ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_policy_col_options);
+    ovsdb_idl_add_column(ctx->idl,
+                         &nbrec_logical_router_policy_col_bfd_sessions);
 }
 
 static void
@@ -4325,6 +4501,7 @@ nbctl_pre_lr_route_add(struct ctl_context *ctx)
     ovsdb_idl_add_column(ctx->idl, &nbrec_logical_router_port_col_name);
 
     ovsdb_idl_add_column(ctx->idl, &nbrec_bfd_col_dst_ip);
+    ovsdb_idl_add_column(ctx->idl, &nbrec_bfd_col_logical_port);
 
     ovsdb_idl_add_column(ctx->idl,
                          &nbrec_logical_router_static_route_col_ip_prefix);
@@ -4625,6 +4802,7 @@ static void
             nexthop = normalize_prefix_str(ctx->argv[3]);
             if (!nexthop) {
                 ctl_error(ctx, "bad nexthop argument: %s", ctx->argv[3]);
+                free(prefix);
                 return;
             }
         }
@@ -6586,18 +6764,17 @@ print_route(const struct nbrec_logical_router_static_route *route,
 {
 
     char *prefix = normalize_prefix_str(route->ip_prefix);
-    char *next_hop = "";
+    char *next_hop = NULL;
 
     if (!strcmp(route->nexthop, "discard")) {
         next_hop = xasprintf("discard");
     } else if (route->nexthop[0]) {
         next_hop = normalize_prefix_str(route->nexthop);
     }
-    ds_put_format(s, "%25s %25s", prefix, next_hop);
+    ds_put_format(s, "%25s %25s", prefix ? prefix : "",
+                  next_hop ? next_hop : "");
     free(prefix);
-    if (next_hop[0]) {
-        free(next_hop);
-    }
+    free(next_hop);
 
     if (route->policy) {
         ds_put_format(s, " %s", route->policy);
@@ -7193,7 +7370,7 @@ ha_chassis_group_by_name_or_uuid(struct ctl_context *ctx, const char *id,
     }
 
     if (!ha_ch_grp && must_exist) {
-        ctx->error = xasprintf("%s: ha_chassi_group %s not found",
+        ctx->error = xasprintf("%s: ha_chassis_group %s not found",
                                id, is_uuid ? "UUID" : "name");
     }
 
@@ -7239,23 +7416,45 @@ pre_ha_ch_grp_list(struct ctl_context *ctx)
 }
 
 static void
-cmd_ha_ch_grp_list(struct ctl_context *ctx)
+ha_ch_grp_info_print(struct ctl_context *ctx,
+                     const struct nbrec_ha_chassis_group *ha_ch_grp)
+{
+    ds_put_format(&ctx->output, UUID_FMT " (%s)\n",
+                  UUID_ARGS(&ha_ch_grp->header_.uuid), ha_ch_grp->name);
+    const struct nbrec_ha_chassis *ha_ch;
+    for (size_t i = 0; i < ha_ch_grp->n_ha_chassis; i++) {
+        ha_ch = ha_ch_grp->ha_chassis[i];
+        ds_put_format(&ctx->output,
+                      "    "UUID_FMT " (%s)\n"
+                      "    priority %"PRId64"\n\n",
+                      UUID_ARGS(&ha_ch->header_.uuid), ha_ch->chassis_name,
+                      ha_ch->priority);
+    }
+    ds_put_cstr(&ctx->output, "\n");
+}
+
+static void
+ha_ch_grp_list_all(struct ctl_context *ctx)
 {
     const struct nbrec_ha_chassis_group *ha_ch_grp;
 
     NBREC_HA_CHASSIS_GROUP_FOR_EACH (ha_ch_grp, ctx->idl) {
-        ds_put_format(&ctx->output, UUID_FMT " (%s)\n",
-                      UUID_ARGS(&ha_ch_grp->header_.uuid), ha_ch_grp->name);
-        const struct nbrec_ha_chassis *ha_ch;
-        for (size_t i = 0; i < ha_ch_grp->n_ha_chassis; i++) {
-            ha_ch = ha_ch_grp->ha_chassis[i];
-            ds_put_format(&ctx->output,
-                          "    "UUID_FMT " (%s)\n"
-                          "    priority %"PRId64"\n\n",
-                          UUID_ARGS(&ha_ch->header_.uuid), ha_ch->chassis_name,
-                          ha_ch->priority);
+        ha_ch_grp_info_print(ctx, ha_ch_grp);
+    }
+}
+
+static void
+cmd_ha_ch_grp_list(struct ctl_context *ctx)
+{
+    if (ctx->argc == 1) {
+        ha_ch_grp_list_all(ctx);
+    } else if (ctx->argc == 2) {
+        const char *name_or_id = ctx->argv[1];
+        const struct nbrec_ha_chassis_group *ha_ch_grp =
+            ha_chassis_group_by_name_or_uuid(ctx, name_or_id, true);
+        if (ha_ch_grp) {
+            ha_ch_grp_info_print(ctx, ha_ch_grp);
         }
-        ds_put_cstr(&ctx->output, "\n");
     }
 }
 
@@ -7399,26 +7598,30 @@ parse_mirror_filter(const char *arg, const char **selection_p)
         *selection_p = "to-lport";
     } else if (arg[0] == 'f') {
         *selection_p = "from-lport";
+    } else if (arg[0] == 'b') {
+        *selection_p = "both";
     } else {
         *selection_p = NULL;
-        return xasprintf("%s: selection must be \"to-lport\" or "
-                         "\"from-lport\"", arg);
+        return xasprintf("%s: selection must be \"to-lport\", "
+                         "\"from-lport\", or \"both\"", arg);
     }
     return NULL;
 }
 
 static char * OVS_WARN_UNUSED_RESULT
-parse_mirror_tunnel_type(const char *arg, const char **type_p)
+parse_mirror_type(const char *arg, const char **type_p)
 {
     /* Validate type.  Only require the first letter. */
     if (arg[0] == 'g') {
         *type_p = "gre";
     } else if (arg[0] == 'e') {
         *type_p = "erspan";
+    } else if (arg[0] == 'l') {
+        *type_p = "local";
     } else {
         *type_p = NULL;
-        return xasprintf("%s: type must be \"gre\" or "
-                         "\"erspan\"", arg);
+        return xasprintf("%s: type must be \"gre\", "
+                         "\"erspan\", or \"local\"", arg);
     }
     return NULL;
 }
@@ -7437,16 +7640,16 @@ static void
 nbctl_mirror_add(struct ctl_context *ctx)
 {
     const char *filter = NULL;
-    const char *sink_ip = NULL;
+    const char *sink = NULL;
     const char *type = NULL;
     const char *name = NULL;
-    char *new_sink_ip = NULL;
     int64_t index;
     char *error = NULL;
     const struct nbrec_mirror *mirror_check = NULL;
+    int pos = 1;
 
     /* Mirror Name */
-    name = ctx->argv[1];
+    name = ctx->argv[pos++];
     NBREC_MIRROR_FOR_EACH (mirror_check, ctx->idl) {
         if (!strcmp(mirror_check->name, name)) {
             ctl_error(ctx, "Mirror with %s name already exists.",
@@ -7455,40 +7658,44 @@ nbctl_mirror_add(struct ctl_context *ctx)
         }
     }
 
-    /* Tunnel Type - GRE/ERSPAN */
-    error = parse_mirror_tunnel_type(ctx->argv[2], &type);
+    /* Type - gre/erspan/local */
+    error = parse_mirror_type(ctx->argv[pos++], &type);
     if (error) {
         ctx->error = error;
         return;
     }
 
-    /* tunnel index / GRE key / ERSPAN idx */
-    if (!str_to_long(ctx->argv[3], 10, (long int *) &index)) {
-        ctl_error(ctx, "Invalid Index");
-        return;
+    if (strcmp(type, "local")) {
+        /* tunnel index / GRE key / ERSPAN idx */
+        if (!str_to_long(ctx->argv[pos++], 10, (long int *) &index)) {
+            ctl_error(ctx, "Invalid Index");
+            return;
+        }
     }
 
     /* Filter for mirroring */
-    error = parse_mirror_filter(ctx->argv[4], &filter);
+    error = parse_mirror_filter(ctx->argv[pos++], &filter);
     if (error) {
         ctx->error = error;
         return;
     }
 
     /* Destination / Sink details */
-    sink_ip = ctx->argv[5];
+    sink = ctx->argv[pos++];
 
-    /* check if it is a valid ip */
-    new_sink_ip = normalize_ipv4_addr_str(sink_ip);
-    if (!new_sink_ip) {
-        new_sink_ip = normalize_ipv6_addr_str(sink_ip);
-    }
+    /* check if it is a valid ip unless it is type 'local' */
+    if (strcmp(type, "local")) {
+        char *new_sink_ip = normalize_ipv4_addr_str(sink);
+        if (!new_sink_ip) {
+            new_sink_ip = normalize_ipv6_addr_str(sink);
+        }
 
-    if (!new_sink_ip) {
-        ctl_error(ctx, "Invalid sink ip: %s", sink_ip);
-        return;
+        if (!new_sink_ip) {
+            ctl_error(ctx, "Invalid sink ip: %s", sink);
+            return;
+        }
+        free(new_sink_ip);
     }
-    free(new_sink_ip);
 
     /* Create the mirror. */
     struct nbrec_mirror *mirror = nbrec_mirror_insert(ctx->txn);
@@ -7496,7 +7703,7 @@ nbctl_mirror_add(struct ctl_context *ctx)
     nbrec_mirror_set_index(mirror, index);
     nbrec_mirror_set_filter(mirror, filter);
     nbrec_mirror_set_type(mirror, type);
-    nbrec_mirror_set_sink(mirror, sink_ip);
+    nbrec_mirror_set_sink(mirror, sink);
 
 }
 
@@ -7658,9 +7865,9 @@ static const struct ctl_command_syntax nbctl_commands[] = {
     { "acl-add", 5, 6, "{SWITCH | PORTGROUP} DIRECTION PRIORITY MATCH ACTION",
       nbctl_pre_acl, nbctl_acl_add, NULL,
       "--log,--may-exist,--type=,--name=,--severity=,--meter=,--label=,"
-      "--apply-after-lb", RW },
+      "--apply-after-lb,--tier=", RW },
     { "acl-del", 1, 4, "{SWITCH | PORTGROUP} [DIRECTION [PRIORITY MATCH]]",
-      nbctl_pre_acl, nbctl_acl_del, NULL, "--type=", RW },
+      nbctl_pre_acl, nbctl_acl_del, NULL, "--type=,--tier=", RW },
     { "acl-list", 1, 1, "{SWITCH | PORTGROUP}",
       nbctl_pre_acl_list, nbctl_acl_list, NULL, "--type=", RO },
 
@@ -7674,7 +7881,7 @@ static const struct ctl_command_syntax nbctl_commands[] = {
       NULL, "", RO },
 
     /* mirror commands. */
-    { "mirror-add", 5, 5,
+    { "mirror-add", 4, 5,
       "NAME TYPE INDEX FILTER IP",
       nbctl_pre_mirror_add, nbctl_mirror_add, NULL, "--may-exist", RW },
     { "mirror-del", 0, 1, "[NAME]",
@@ -7800,7 +8007,8 @@ static const struct ctl_command_syntax nbctl_commands[] = {
     /* Policy commands */
     { "lr-policy-add", 4, INT_MAX,
      "ROUTER PRIORITY MATCH ACTION [NEXTHOP] [OPTIONS - KEY=VALUE ...]",
-     nbctl_pre_lr_policy_add, nbctl_lr_policy_add, NULL, "--may-exist", RW },
+     nbctl_pre_lr_policy_add, nbctl_lr_policy_add, NULL, "--may-exist,--bfd?",
+     RW },
     { "lr-policy-del", 1, 3, "ROUTER [{PRIORITY | UUID} [MATCH]]",
       nbctl_pre_lr_policy_del, nbctl_lr_policy_del, NULL, "--if-exists", RW },
     { "lr-policy-list", 1, 1, "ROUTER", nbctl_pre_lr_policy_list,
@@ -7891,7 +8099,7 @@ static const struct ctl_command_syntax nbctl_commands[] = {
      NULL, cmd_ha_ch_grp_add, NULL, "", RW },
     {"ha-chassis-group-del", 1, 1, "[CHASSIS GROUP]",
      pre_ha_ch_grp_del, cmd_ha_ch_grp_del, NULL, "", RW },
-    {"ha-chassis-group-list", 0, 0, "[CHASSIS GROUP]",
+    {"ha-chassis-group-list", 0, 1, "[CHASSIS GROUP]",
      pre_ha_ch_grp_list, cmd_ha_ch_grp_list, NULL, "", RO },
     {"ha-chassis-group-add-chassis", 3, 3, "[CHASSIS GROUP]",
      pre_ha_ch_grp_add_chassis, cmd_ha_ch_grp_add_chassis, NULL, "", RW },
@@ -7935,6 +8143,7 @@ main(int argc, char *argv[])
         .add_base_prerequisites = nbctl_add_base_prerequisites,
         .pre_execute = nbctl_pre_execute,
         .post_execute = nbctl_post_execute,
+        .get_inactivity_probe = get_inactivity_probe,
 
         .ctx_create = nbctl_ctx_create,
         .ctx_destroy = nbctl_ctx_destroy,

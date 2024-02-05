@@ -50,6 +50,9 @@ struct local_datapath {
     /* The localnet port in this datapath, if any (at most one is allowed). */
     const struct sbrec_port_binding *localnet_port;
 
+    /* The vtep port in this datapath, if any (at most one is allowed). */
+    const struct sbrec_port_binding *vtep_port;
+
     struct {
         const struct sbrec_port_binding *local;
         const struct sbrec_port_binding *remote;
@@ -66,6 +69,10 @@ struct local_datapath *local_datapath_alloc(
     const struct sbrec_datapath_binding *);
 struct local_datapath *get_local_datapath(const struct hmap *,
                                           uint32_t tunnel_key);
+struct local_datapath *get_local_datapath_no_hash(
+    const struct hmap *local_datapaths,
+    uint32_t tunnel_key);
+
 bool
 need_add_peer_to_local(
     struct ovsdb_idl_index *sbrec_port_binding_by_name,
@@ -133,6 +140,7 @@ struct chassis_tunnel {
     char *chassis_id;
     ofp_port_t ofport;
     enum chassis_tunnel_type type;
+    bool is_ipv6;
 };
 
 void local_nonvif_data_run(const struct ovsrec_bridge *br_int,
@@ -145,10 +153,11 @@ bool local_nonvif_data_handle_ovs_iface_changes(
 
 struct chassis_tunnel *chassis_tunnel_find(const struct hmap *chassis_tunnels,
                                            const char *chassis_id,
-                                           char *encap_ip);
+                                           char *remote_encap_ip,
+                                           const char *local_encap_ip);
 
 bool get_chassis_tunnel_ofport(const struct hmap *chassis_tunnels,
-                               const char *chassis_name, char *encap_ip,
+                               const char *chassis_name,
                                ofp_port_t *ofport);
 
 void chassis_tunnels_destroy(struct hmap *chassis_tunnels);

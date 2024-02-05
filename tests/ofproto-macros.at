@@ -200,14 +200,14 @@ m4_define([_OVS_VSWITCHD_START],
    AT_CHECK([[sed < stderr '
 /vlog|INFO|opened log file/d
 /ovsdb_server|INFO|ovsdb-server (Open vSwitch)/d']])
-   AT_CAPTURE_FILE([ovsdb-server.log])
+  # AT_CAPTURE_FILE([ovsdb-server.log])
 
    dnl Initialize database.
    AT_CHECK([ovs-vsctl --no-wait init $2])
 
    dnl Start ovs-vswitchd.
    AT_CHECK([ovs-vswitchd $1 --detach --no-chdir --pidfile --log-file -vvconn -vofproto_dpif -vunixctl], [0], [], [stderr])
-   AT_CAPTURE_FILE([ovs-vswitchd.log])
+   #AT_CAPTURE_FILE([ovs-vswitchd.log])
    on_exit "kill_ovs_vswitchd `cat ovs-vswitchd.pid`"
    AT_CHECK([[sed < stderr '
 /ovs_numa|INFO|Discovered /d
@@ -218,11 +218,12 @@ m4_define([_OVS_VSWITCHD_START],
 /ofproto|INFO|using datapath ID/d
 /netdev_linux|INFO|.*device has unknown hardware address family/d
 /ofproto|INFO|datapath ID changed to fedcba9876543210/d
-/dpdk|INFO|DPDK Disabled - Use other_config:dpdk-init to enable/d
 /netlink_socket|INFO|netlink: could not enable listening to all nsid/d
 /netdev: Flow API/d
 /probe tc:/d
-/tc: Using policy/d']])
+/tc: Using policy/d
+/dpdk|INFO|/d
+/dpdk|WARN|/d']])
 ])
 
 # OVS_VSWITCHD_START([vsctl-args], [vsctl-output], [=override],
@@ -247,15 +248,15 @@ m4_define([OVS_VSWITCHD_START],
    AT_CHECK([add_of_br 0 $1 m4_if([$2], [], [], [| uuidfilt])], [0], [$2])
 ])
 
-# check_logs scans through all *.log files (except '*.log' and testsuite.log)
+# check_logs scans through all *.log files (except '*.log' and '*testsuite.log')
 # and reports all WARN, ERR, EMER log entries.  User can add custom sed filters
-# in $1.
+# in $1 and select folder with $2.
 m4_divert_push([PREPARE_TESTS])
 check_logs () {
     local logs
-    for log in *.log; do
+    for log in ./$2/*.log; do
         case ${log} in # (
-            '*.log'|testsuite.log) ;; # (
+            '*.log'|*testsuite.log) ;; # (
             *) logs="${logs} ${log}" ;;
         esac
     done
@@ -286,6 +287,7 @@ check_logs () {
 /timeval.*context switches: [[0-9]]* voluntary, [[0-9]]* involuntary/d
 /ovs_rcu.*blocked [[0-9]]* ms waiting for .* to quiesce/d
 /Dropped [[0-9]]* log messages/d
+/.*Trying to release unknown interface.*/d
 /|WARN|/p
 /|ERR|/p
 /|EMER|/p" ${logs}

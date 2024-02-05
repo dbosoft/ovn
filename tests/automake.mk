@@ -2,13 +2,17 @@ EXTRA_DIST += \
 	$(COMMON_MACROS_AT) \
 	$(TESTSUITE_AT) \
 	$(SYSTEM_TESTSUITE_AT) \
+	$(SYSTEM_DPDK_TESTSUITE_AT) \
 	$(SYSTEM_KMOD_TESTSUITE_AT) \
 	$(SYSTEM_USERSPACE_TESTSUITE_AT) \
 	$(PERF_TESTSUITE_AT) \
+	$(MULTINODE_TESTSUITE_AT) \
 	$(TESTSUITE) \
+	$(SYSTEM_DPDK_TESTSUITE) \
 	$(SYSTEM_KMOD_TESTSUITE) \
 	$(SYSTEM_USERSPACE_TESTSUITE) \
 	$(PERF_TESTSUITE) \
+	$(MULTINODE_TESTSUITE) \
 	tests/atlocal.in \
 	$(srcdir)/package.m4 \
 	$(srcdir)/tests/testsuite \
@@ -42,37 +46,47 @@ TESTSUITE_AT = \
 	tests/ovn-ipsec.at \
 	tests/ovn-vif-plug.at
 
+SYSTEM_DPDK_TESTSUITE_AT = \
+	tests/system-dpdk-testsuite.at \
+	tests/system-dpdk-macros.at
+
 SYSTEM_KMOD_TESTSUITE_AT = \
-	tests/system-common-macros.at \
+	tests/system-kmod-macros.at \
 	tests/system-kmod-testsuite.at \
-	tests/system-kmod-macros.at
+	tests/system-ovn-kmod.at
 
 SYSTEM_USERSPACE_TESTSUITE_AT = \
 	tests/system-userspace-testsuite.at \
-	tests/system-ovn.at \
 	tests/system-userspace-macros.at
 
 SYSTEM_TESTSUITE_AT = \
 	tests/system-common-macros.at \
-	tests/system-ovn.at \
-	tests/system-ovn-kmod.at
+	tests/system-ovn.at
 
 PERF_TESTSUITE_AT = \
 	tests/perf-testsuite.at \
 	tests/perf-northd.at
+
+MULTINODE_TESTSUITE_AT = \
+	tests/multinode-testsuite.at \
+	tests/multinode-macros.at \
+	tests/multinode.at
 
 check_SCRIPTS += tests/atlocal
 
 TESTSUITE = $(srcdir)/tests/testsuite
 TESTSUITE_PATCH = $(srcdir)/tests/testsuite.patch
 TESTSUITE_DIR = $(abs_top_builddir)/tests/testsuite.dir
+SYSTEM_DPDK_TESTSUITE = $(srcdir)/tests/system-dpdk-testsuite
 SYSTEM_KMOD_TESTSUITE = $(srcdir)/tests/system-kmod-testsuite
 SYSTEM_USERSPACE_TESTSUITE = $(srcdir)/tests/system-userspace-testsuite
 PERF_TESTSUITE = $(srcdir)/tests/perf-testsuite
 PERF_TESTSUITE_DIR = $(abs_top_builddir)/tests/perf-testsuite.dir
 PERF_TESTSUITE_RESULTS = $(PERF_TESTSUITE_DIR)/results
 DISTCLEANFILES += tests/atconfig tests/atlocal
-
+MULTINODE_TESTSUITE = $(srcdir)/tests/multinode-testsuite
+MULTINODE_TESTSUITE_DIR = $(abs_top_builddir)/tests/multinode-testsuite.dir
+MULTINODE_TESTSUITE_RESULTS = $(MULTINODE_TESTSUITE_DIR)/results
 AUTOTEST_PATH = $(ovs_builddir)/utilities:$(ovs_builddir)/vswitchd:$(ovs_builddir)/ovsdb:$(ovs_builddir)/vtep:tests:$(PTHREAD_WIN32_DIR_DLL):$(SSL_DIR):controller-vtep:northd:utilities:controller:ic
 
 export ovs_srcdir
@@ -171,6 +185,10 @@ check-userspace-valgrind: all $(valgrind_wrappers) $(check_DATA)
 check-helgrind: all $(valgrind_wrappers) $(check_DATA)
 	-$(SHELL) '$(TESTSUITE)' -C tests CHECK_VALGRIND=true VALGRIND='$(HELGRIND)' AUTOTEST_PATH='tests/valgrind:$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS)
 
+check-system-dpdk: all
+	set $(SHELL) '$(SYSTEM_DPDK_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)'; \
+	$(SUDO) "$$@" $(TESTSUITEFLAGS) -j1 || (test X'$(RECHECK)' = Xyes && $(SUDO) "$$@" --recheck)
+
 # Run kmod tests. Assume kernel modules has been installed or linked into the kernel
 check-kernel: all
 	set $(SHELL) '$(SYSTEM_KMOD_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)'; \
@@ -197,6 +215,18 @@ check-perf: all
 	@echo
 	@echo "Results can be found in $(PERF_TESTSUITE_RESULTS)"
 
+check-multinode: all
+	@mkdir -p $(MULTINODE_TESTSUITE_DIR)
+	@echo  > $(MULTINODE_TESTSUITE_RESULTS)
+	set $(SHELL) '$(MULTINODE_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)'; \
+	"$$@" $(TESTSUITEFLAGS) -j1 || (test X'$(RECHECK)' = Xyes && "$$@" --recheck)
+	@echo
+	@echo  '## -------------------- ##'
+	@echo  '##  Multinode test Results ##'
+	@echo  '## -------------------- ##'
+	@cat $(MULTINODE_TESTSUITE_RESULTS)
+	@echo
+	@echo "Results can be found in $(MULTINODE_TESTSUITE_RESULTS)"
 
 AUTOTEST = $(AUTOM4TE) --language=autotest
 
@@ -211,6 +241,10 @@ $(TESTSUITE): package.m4 $(TESTSUITE_AT) $(COMMON_MACROS_AT)
 	$(AM_V_at)mv $@.tmp $@
 endif
 
+$(SYSTEM_DPDK_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_DPDK_TESTSUITE_AT) $(COMMON_MACROS_AT)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+	$(AM_V_at)mv $@.tmp $@
+
 $(SYSTEM_KMOD_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_KMOD_TESTSUITE_AT) $(COMMON_MACROS_AT)
 	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
 	$(AM_V_at)mv $@.tmp $@
@@ -220,6 +254,10 @@ $(SYSTEM_USERSPACE_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_USERSP
 	$(AM_V_at)mv $@.tmp $@
 
 $(PERF_TESTSUITE): package.m4 $(PERF_TESTSUITE_AT) $(COMMON_MACROS_AT)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+	$(AM_V_at)mv $@.tmp $@
+
+$(MULTINODE_TESTSUITE): package.m4 $(MULTINODE_TESTSUITE_AT) $(COMMON_MACROS_AT)
 	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
 	$(AM_V_at)mv $@.tmp $@
 
@@ -272,7 +310,8 @@ CHECK_PYFILES = \
 	tests/test-l7.py \
 	tests/uuidfilt.py \
 	tests/test-tcp-rst.py \
-	tests/check_acl_log.py
+	tests/check_acl_log.py \
+	tests/scapy-server.py
 
 EXTRA_DIST += $(CHECK_PYFILES)
 PYCOV_CLEAN_FILES += $(CHECK_PYFILES:.py=.py,cover) .coverage

@@ -205,6 +205,9 @@ create_gen_opts(struct hmap *dhcp_opts, struct hmap *dhcpv6_opts,
     dhcp_opt_add(dhcpv6_opts, "ia_addr",  5, "ipv6");
     dhcp_opt_add(dhcpv6_opts, "dns_server",  23, "ipv6");
     dhcp_opt_add(dhcpv6_opts, "domain_search",  24, "str");
+    dhcp_opt_add(dhcpv6_opts, "bootfile_name", 59, "str");
+    dhcp_opt_add(dhcpv6_opts, "bootfile_name_alt", 254, "str");
+    dhcp_opt_add(dhcpv6_opts, "fqdn", 39, "domain");
 
     /* IPv6 ND RA options. */
     hmap_init(nd_ra_opts);
@@ -996,7 +999,7 @@ test_tree_shape_exhaustively(struct expr *expr, struct shash *symtab,
 
             if (operation >= OP_FLOW) {
                 bool found = classifier_lookup(&cls, OVS_VERSION_MIN,
-                                               &f, NULL) != NULL;
+                                               &f, NULL, NULL) != NULL;
                 if (expected != found) {
                     struct ds expr_s, modified_s;
 
@@ -1235,7 +1238,7 @@ test_expr_to_packets(struct ovs_cmdl_context *ctx OVS_UNUSED)
         uint64_t packet_stub[128 / 8];
         struct dp_packet packet;
         dp_packet_use_stub(&packet, packet_stub, sizeof packet_stub);
-        flow_compose(&packet, &uflow, NULL, 64);
+        flow_compose(&packet, &uflow, NULL, 64, false);
 
         struct ds output = DS_EMPTY_INITIALIZER;
         const uint8_t *buf = dp_packet_data(&packet);
@@ -1297,11 +1300,11 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
 
     /* Initialize group ids. */
     struct ovn_extend_table group_table;
-    ovn_extend_table_init(&group_table);
+    ovn_extend_table_init(&group_table, "group-table", OFPG_MAX);
 
     /* Initialize meter ids for QoS. */
     struct ovn_extend_table meter_table;
-    ovn_extend_table_init(&meter_table);
+    ovn_extend_table_init(&meter_table, "meter-table", OFPM13_MAX);
 
     /* Initialize collector sets. */
     struct flow_collector_ids collector_ids;
@@ -1371,6 +1374,7 @@ test_parse_actions(struct ovs_cmdl_context *ctx OVS_UNUSED)
                 .common_nat_ct_zone = MFF_LOG_DNAT_ZONE,
                 .in_port_sec_ptable = OFTABLE_CHK_IN_PORT_SEC,
                 .out_port_sec_ptable = OFTABLE_CHK_OUT_PORT_SEC,
+                .mac_cache_use_table = OFTABLE_MAC_CACHE_USE,
                 .lflow_uuid.parts =
                     { 0xaaaaaaaa, 0xbbbbbbbb, 0xcccccccc, 0xdddddddd},
                 .dp_key = 0xabcdef,

@@ -18,6 +18,8 @@
 
 #include "ovsdb-idl.h"
 #include "lib/packets.h"
+#include "lib/sset.h"
+#include "lib/svec.h"
 #include "include/ovn/version.h"
 
 #define ovn_set_program_name(name) \
@@ -28,6 +30,13 @@
 
 #define ROUTE_ORIGIN_CONNECTED "connected"
 #define ROUTE_ORIGIN_STATIC "static"
+
+#define ETH_CRC_LENGTH 4
+#define ETHERNET_OVERHEAD (ETH_HEADER_LEN + ETH_CRC_LENGTH)
+
+#define GENEVE_TUNNEL_OVERHEAD 38
+#define STT_TUNNEL_OVERHEAD 18
+#define VXLAN_TUNNEL_OVERHEAD 30
 
 struct eth_addr;
 struct nbrec_logical_router_port;
@@ -103,7 +112,8 @@ bool extract_sbrec_binding_first_mac(const struct sbrec_port_binding *binding,
 bool extract_lrp_networks__(char *mac, char **networks, size_t n_networks,
                             struct lport_addresses *laddrs);
 
-bool lport_addresses_is_empty(struct lport_addresses *);
+bool lport_addresses_is_empty(const struct lport_addresses *);
+void init_lport_addresses(struct lport_addresses *);
 void destroy_lport_addresses(struct lport_addresses *);
 const char *find_lport_address(const struct lport_addresses *laddrs,
                                const char *ip_s);
@@ -111,7 +121,7 @@ const char *find_lport_address(const struct lport_addresses *laddrs,
 void split_addresses(const char *addresses, struct svec *ipv4_addrs,
                      struct svec *ipv6_addrs);
 
-char *alloc_nat_zone_key(const struct uuid *key, const char *type);
+char *alloc_nat_zone_key(const char *name, const char *type);
 
 const char *default_nb_db(void);
 const char *default_sb_db(void);
@@ -136,8 +146,6 @@ uint32_t sbrec_logical_flow_hash(const struct sbrec_logical_flow *);
 uint32_t ovn_logical_flow_hash(uint8_t table_id, enum ovn_pipeline pipeline,
                                uint16_t priority,
                                const char *match, const char *actions);
-uint32_t ovn_logical_flow_hash_datapath(const struct uuid *logical_datapath,
-                                        uint32_t hash);
 void ovn_conn_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
                    const char *argv[] OVS_UNUSED, void *idl_);
 
@@ -160,6 +168,7 @@ bool ovn_add_tnlid(struct hmap *set, uint32_t tnlid);
 bool ovn_tnlid_present(struct hmap *tnlids, uint32_t tnlid);
 uint32_t ovn_allocate_tnlid(struct hmap *set, const char *name, uint32_t min,
                             uint32_t max, uint32_t *hint);
+bool ovn_free_tnlid(struct hmap *tnlids, uint32_t tnlid);
 
 static inline void
 get_unique_lport_key(uint64_t dp_tunnel_key, uint64_t lport_tunnel_key,
@@ -190,14 +199,11 @@ void ovn_set_pidfile(const char *name);
 
 bool ip46_parse_cidr(const char *str, struct in6_addr *prefix,
                      unsigned int *plen);
+bool ip46_parse(const char *ip_str, struct in6_addr *ip);
 
 char *normalize_ipv4_prefix(ovs_be32 ipv4, unsigned int plen);
 char *normalize_ipv6_prefix(const struct in6_addr *ipv6, unsigned int plen);
 char *normalize_v46_prefix(const struct in6_addr *prefix, unsigned int plen);
-
-/* Temporary util function until ovs library has smap_get_unit. */
-unsigned int ovn_smap_get_uint(const struct smap *smap, const char *key,
-                               unsigned int def);
 
 /* Returns a lowercase copy of orig.
  * Caller must free the returned string.
@@ -344,13 +350,6 @@ char *ovn_get_internal_version(void);
  * packets.h file. For the time being, they live here because OVN uses them
  * and OVS does not.
  */
-#define SCTP_CHUNK_HEADER_LEN 4
-struct sctp_chunk_header {
-    uint8_t sctp_chunk_type;
-    uint8_t sctp_chunk_flags;
-    ovs_be16 sctp_chunk_len;
-};
-BUILD_ASSERT_DECL(SCTP_CHUNK_HEADER_LEN == sizeof(struct sctp_chunk_header));
 
 #define SCTP_INIT_CHUNK_LEN 16
 struct sctp_16aligned_init_chunk {
@@ -376,11 +375,6 @@ BUILD_ASSERT_DECL(
 
 /* The number of tables for the ingress and egress pipelines. */
 #define LOG_PIPELINE_LEN 29
-
-#ifdef DDLOG
-void ddlog_warn(const char *msg);
-void ddlog_err(const char *msg);
-#endif
 
 static inline uint32_t
 hash_add_in6_addr(uint32_t hash, const struct in6_addr *addr)
@@ -464,5 +458,93 @@ void flow_collector_ids_add(struct flow_collector_ids *, uint64_t);
 bool flow_collector_ids_lookup(const struct flow_collector_ids *, uint32_t);
 void flow_collector_ids_destroy(struct flow_collector_ids *);
 void flow_collector_ids_clear(struct flow_collector_ids *);
+
+/* The DNS format is 2 bytes longer than the "domain".
+ * It replaces every '.' with len of the next name.
+ * The returned pointer has to be freed by caller. */
+char *encode_fqdn_string(const char *fqdn, size_t *len);
+
+/* Corresponds to each Port_Binding.type. */
+enum en_lport_type {
+    LP_UNKNOWN,
+    LP_VIF,
+    LP_CONTAINER,
+    LP_PATCH,
+    LP_L3GATEWAY,
+    LP_LOCALNET,
+    LP_LOCALPORT,
+    LP_L2GATEWAY,
+    LP_VTEP,
+    LP_CHASSISREDIRECT,
+    LP_VIRTUAL,
+    LP_EXTERNAL,
+    LP_REMOTE
+};
+
+enum en_lport_type get_lport_type(const struct sbrec_port_binding *);
+char *get_lport_type_str(enum en_lport_type lport_type);
+bool is_pb_router_type(const struct sbrec_port_binding *);
+
+/* A wrapper that holds sorted arrays of strings. */
+struct sorted_array {
+    const char **arr;
+    bool owns_array;
+    size_t n;
+};
+
+static inline struct sorted_array
+sorted_array_create(const char **sorted_data, size_t n, bool take_ownership)
+{
+    return (struct sorted_array) {
+        .arr = sorted_data,
+        .owns_array = take_ownership,
+        .n = n,
+    };
+}
+
+static inline void
+sorted_array_destroy(struct sorted_array *a)
+{
+    if (a->owns_array) {
+        free(a->arr);
+    }
+}
+
+static inline struct sorted_array
+sorted_array_from_svec(struct svec *v)
+{
+    svec_sort(v);
+    return sorted_array_create((const char **) v->names, v->n, false);
+}
+
+static inline struct sorted_array
+sorted_array_from_sset(struct sset *s)
+{
+    return sorted_array_create(sset_sort(s), sset_count(s), true);
+}
+
+/* DB set columns are already sorted, just wrap them into a sorted array. */
+#define sorted_array_from_dbrec(dbrec, column)           \
+    sorted_array_create((const char **) (dbrec)->column, \
+                        (dbrec)->n_##column, false)
+
+void sorted_array_apply_diff(const struct sorted_array *a1,
+                             const struct sorted_array *a2,
+                             void (*apply_callback)(const void *arg,
+                                                    const char *item,
+                                                    bool add),
+                             const void *arg);
+
+/* Utilities around properly handling exit command. */
+struct ovn_exit_args {
+    struct unixctl_conn **conns;
+    size_t n_conns;
+    bool exiting;
+    bool restart;
+};
+
+void ovn_exit_command_callback(struct unixctl_conn *conn, int argc,
+                               const char *argv[], void *exit_args_);
+void ovn_exit_args_finish(struct ovn_exit_args *exit_args);
 
 #endif /* OVN_UTIL_H */

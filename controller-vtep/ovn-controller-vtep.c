@@ -116,7 +116,7 @@ main(int argc, char *argv[])
     parse_options(argc, argv);
     fatal_ignore_sigpipe();
 
-    daemonize_start(false);
+    daemonize_start(false, false);
 
     char *abs_unixctl_path = get_abs_unix_ctl_path(NULL);
     retval = unixctl_server_create(abs_unixctl_path, &unixctl);
@@ -306,10 +306,12 @@ parse_options(int argc, char *argv[])
 
         switch (c) {
         case 'd':
+            free(ovnsb_remote);
             ovnsb_remote = xstrdup(optarg);
             break;
 
         case 'D':
+            free(vtep_remote);
             vtep_remote = xstrdup(optarg);
             break;
 

@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-#ifndef MAC_BINDING_AGING_H
-#define MAC_BINDING_AGING_H 1
+#ifndef AGING_H
+#define AGING_H 1
 
 #include "lib/inc-proc-eng.h"
 
@@ -30,4 +30,18 @@ void *en_mac_binding_aging_waker_init(struct engine_node *node,
                                       struct engine_arg *arg);
 void en_mac_binding_aging_waker_cleanup(void *data);
 
-#endif /* northd/mac-binding-aging.h */
+/* The MAC binding aging helper function. */
+unsigned int min_mac_binding_age_threshold(const char *opt);
+
+/* The FDB aging node functions. */
+void en_fdb_aging_run(struct engine_node *node, void *data);
+void *en_fdb_aging_init(struct engine_node *node, struct engine_arg *arg);
+void en_fdb_aging_cleanup(void *data);
+
+/* The FDB aging waker node functions. */
+void en_fdb_aging_waker_run(struct engine_node *node, void *data);
+void *en_fdb_aging_waker_init(struct engine_node *node,
+                              struct engine_arg *arg);
+void en_fdb_aging_waker_cleanup(void *data);
+
+#endif /* northd/aging.h */

@@ -231,20 +231,15 @@ dhcp_opts_clear(struct hmap *dhcp_opts)
     gen_opts_clear(dhcp_opts);
 }
 
-OVS_PACKED(
+#define DHCP_OPT_HEADER_LEN 2
 struct dhcp_opt_header {
     uint8_t code;
     uint8_t len;
-});
+};
+BUILD_ASSERT_DECL(DHCP_OPT_HEADER_LEN == sizeof(struct dhcp_opt_header));
 
 #define DHCP_OPT_PAYLOAD(hdr) \
     (void *)((char *)hdr + sizeof(struct dhcp_opt_header))
-
-/* Used in the OpenFlow PACKET_IN userdata */
-struct dhcp_opt6_header {
-    ovs_be16 opt_code;
-    ovs_be16 size;
-};
 
 /* These are not defined in ovs/lib/dhcp.h, hence defining here. */
 #define OVN_DHCP_MSG_DECLINE        4
@@ -260,6 +255,7 @@ struct dhcp_opt6_header {
 #define DHCPV6_MSG_TYPE_REBIND      6
 
 #define DHCPV6_MSG_TYPE_REPLY       7
+#define DHCPV6_MSG_TYPE_RELEASE     8
 #define DHCPV6_MSG_TYPE_DECLINE     9
 #define DHCPV6_MSG_TYPE_INFO_REQ    11
 
@@ -270,10 +266,17 @@ struct dhcp_opt6_header {
 #define DHCPV6_OPT_IA_NA_CODE            3
 #define DHCPV6_OPT_IA_ADDR_CODE          5
 #define DHCPV6_OPT_STATUS_CODE           13
+#define DHCPV6_OPT_USER_CLASS            15
 #define DHCPV6_OPT_DNS_SERVER_CODE       23
 #define DHCPV6_OPT_DOMAIN_SEARCH_CODE    24
 #define DHCPV6_OPT_IA_PD                 25
 #define DHCPV6_OPT_IA_PREFIX             26
+#define DHCPV6_OPT_FQDN_CODE             39
+#define DHCPV6_OPT_BOOT_FILE_URL         59
+#define DHCPV6_OPT_BOOT_FILE_URL_ALT    254
+
+/* DHCPv6 Status codes */
+#define DHCPV6_STATUS_CODE_SUCCESS 0
 
 #define DHCPV6_OPT_SERVER_ID \
     DHCP_OPTION("server_id", DHCPV6_OPT_SERVER_ID_CODE, "mac")
@@ -287,28 +290,47 @@ struct dhcp_opt6_header {
 #define DHCPV6_OPT_DOMAIN_SEARCH \
     DHCP_OPTION("domain_search", DHCPV6_OPT_DOMAIN_SEARCH_CODE, "str")
 
+#define DHCPV6_OPT_BOOTFILE_NAME \
+    DHCP_OPTION("bootfile_name", DHCPV6_OPT_BOOT_FILE_URL, "str")
+
+#define DHCPV6_OPT_BOOTFILE_NAME_ALT \
+    DHCP_OPTION("bootfile_name_alt", DHCPV6_OPT_BOOT_FILE_URL_ALT, "str")
+
+#define DHCPV6_OPT_FQDN \
+    DHCP_OPTION("fqdn", DHCPV6_OPT_FQDN_CODE, "domain")
+
+/* DHCPv6 FQDN flags. RFC 4704 */
+#define DHCPV6_FQDN_FLAGS_UNDEFINED 0xff
+#define DHCPV6_FQDN_FLAGS_S 1 << 0
+#define DHCPV6_FQDN_FLAGS_O 1 << 1
+#define DHCPV6_FQDN_FLAGS_N 1 << 2
+
+#define DHCP6_OPT_HEADER_LEN 4
 OVS_PACKED(
 struct dhcpv6_opt_header {
     ovs_be16 code;
     ovs_be16 len;
 });
+BUILD_ASSERT_DECL(DHCP6_OPT_HEADER_LEN == sizeof(struct dhcpv6_opt_header));
 
-OVS_PACKED(
+#define DHCP6_OPT_SERVER_ID_LEN 14
 struct dhcpv6_opt_server_id {
     struct dhcpv6_opt_header opt;
     ovs_be16 duid_type;
     ovs_be16 hw_type;
     struct eth_addr mac;
-});
+};
+BUILD_ASSERT_DECL(DHCP6_OPT_SERVER_ID_LEN ==
+                  sizeof(struct dhcpv6_opt_server_id));
 
-
-OVS_PACKED(
+#define DHCP6_OPT_IA_ADDR_LEN 28
 struct dhcpv6_opt_ia_addr {
     struct dhcpv6_opt_header opt;
     struct in6_addr ipv6;
     ovs_be32 t1;
     ovs_be32 t2;
-});
+};
+BUILD_ASSERT_DECL(DHCP6_OPT_IA_ADDR_LEN == sizeof(struct dhcpv6_opt_ia_addr));
 
 OVS_PACKED(
 struct dhcpv6_opt_ia_na {
@@ -361,12 +383,14 @@ struct dhcpv6_opt_ia_prefix {
     struct in6_addr ipv6;
 });
 
+#define DHCP6_OPT_STATUS_LEN 6
 OVS_PACKED(
 struct dhcpv6_opt_status {
     struct dhcpv6_opt_header opt;
     ovs_be16 status_code;
     uint8_t msg[];
 });
+BUILD_ASSERT_DECL(DHCP6_OPT_STATUS_LEN == sizeof(struct dhcpv6_opt_status));
 
 #define DHCPV6_DUID_LL      3
 #define DHCPV6_HW_TYPE_ETH  1

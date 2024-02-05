@@ -235,7 +235,7 @@ m4_define([STRIP_MONITOR_CSUM], [grep "csum:" | sed 's/csum:.*/csum: <skip>/'])
 # and limit the output to the rows containing 'ip-addr'.
 #
 m4_define([FORMAT_CT],
-    [[grep -F "dst=$1" | sed -e 's/port=[0-9]*/port=<cleared>/g' -e 's/id=[0-9]*/id=<cleared>/g' -e 's/state=[0-9_A-Z]*/state=<cleared>/g' | sort | uniq]])
+    [[grep -F "dst=$1," | sed -e 's/port=[0-9]*/port=<cleared>/g' -e 's/id=[0-9]*/id=<cleared>/g' -e 's/state=[0-9_A-Z]*/state=<cleared>/g' | sort | uniq]])
 
 # NETNS_DAEMONIZE([namespace], [command], [pidfile])
 #
@@ -330,6 +330,19 @@ m4_define([OVS_CHECK_CT_CLEAR],
 m4_define([OVS_CHECK_CT_ZERO_SNAT],
     [AT_SKIP_IF([! grep -q "Datapath supports ct_zero_snat" ovs-vswitchd.log])])
 
+# LOAD_MODULE([name])
+#
+# Tries to load specified kernel module and removes it after
+# if it wasn't loaded before this call.
+#
+m4_define([LOAD_MODULE],
+    [if ! lsmod | grep -q $1; then
+         on_exit 'modprobe -q -r $1'
+     fi
+     AT_CHECK([modprobe $1])
+    ]
+)
+
 # OVN_TEST_IPV6_PREFIX_DELEGATION()
 m4_define([OVN_TEST_IPV6_PREFIX_DELEGATION],
 [
@@ -359,7 +372,7 @@ ADD_VETH(sw11, sw11, br-int, "192.168.2.2/24", "f0:00:00:02:02:03", \
          "192.168.2.1")
 ADD_NAMESPACES(server)
 ADD_VETH(s1, server, br-ext, "2001:1db8:3333::2/64", "f0:00:00:01:02:05", \
-         "2001:1db8:3333::1")
+         "2001:1db8:3333::1", "nodad")
 
 if test X"$1" = X"GR"; then
    ovn-nbctl create Logical_Router name=R1 options:chassis=hv1
@@ -395,9 +408,6 @@ ovn-nbctl lsp-add sw0 sw01 \
 
 ovn-nbctl lsp-add sw1 sw11 \
     -- lsp-set-addresses sw11 "f0:00:00:02:02:03 192.168.2.2"
-
-OVS_WAIT_UNTIL([test "$(ip netns exec server ip a | grep 2001:1db8:3333::2 | grep tentative)" = ""])
-OVS_WAIT_UNTIL([test "$(ip netns exec server ip a | grep fe80 | grep tentative)" = ""])
 
 AT_CHECK([ovs-vsctl set Open_vSwitch . external-ids:ovn-bridge-mappings=phynet:br-ext])
 ovn-nbctl lsp-add public public1 \
@@ -475,7 +485,7 @@ AT_CHECK([ovn-nbctl get logical_router_port rp-sw0 ipv6_prefix | cut -c3-16], [0
 []
 ])
 
-kill $(pidof ovn-controller)
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
 
 as ovn-sb
 OVS_APP_EXIT_AND_WAIT([ovsdb-server])
@@ -484,7 +494,7 @@ as ovn-nb
 OVS_APP_EXIT_AND_WAIT([ovsdb-server])
 
 as northd
-OVS_APP_EXIT_AND_WAIT([NORTHD_TYPE])
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
 
 as
 OVS_TRAFFIC_VSWITCHD_STOP(["/.*error receiving.*/d

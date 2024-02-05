@@ -18,7 +18,7 @@ dnl OVS_ENABLE_WERROR
 AC_DEFUN([OVS_ENABLE_WERROR],
   [AC_ARG_ENABLE(
      [Werror],
-     [AC_HELP_STRING([--enable-Werror], [Add -Werror to CFLAGS])],
+     [AS_HELP_STRING([--enable-Werror], [Add -Werror to CFLAGS])],
      [], [enable_Werror=no])
    AC_CONFIG_COMMANDS_PRE(
      [if test "X$enable_Werror" = Xyes; then
@@ -41,85 +41,6 @@ AC_DEFUN([OVS_ENABLE_WERROR],
      SPARSE_WERROR=
    fi
    AC_SUBST([SPARSE_WERROR])])
-
-dnl OVS_CHECK_DDLOG([VERSION])
-dnl
-dnl Configure ddlog source tree, checking for the given DDlog VERSION.
-dnl VERSION should be a major and minor, e.g. 0.36, which will accept
-dnl 0.36.0, 0.36.1, and so on.  Omit VERSION to accept any version of
-dnl ddlog (which is probably only useful for developers who are trying
-dnl different versions, since OVN is currently bound to a particular
-dnl DDlog version).
-AC_DEFUN([OVS_CHECK_DDLOG], [
-  AC_ARG_VAR([DDLOG_HOME], [Root of the DDlog installation])
-  AC_ARG_WITH(
-    [ddlog],
-    [AC_HELP_STRING([--with-ddlog[[=INSTALLDIR|LIBDIR]]], [Enables DDlog])],
-    [DDLOG_PATH=$PATH
-     if test "$withval" = yes; then
-       # --with-ddlog: $DDLOG_HOME must be set
-       if test -z "$DDLOG_HOME"; then
-         AC_MSG_ERROR([To build with DDlog, specify the DDlog install or library directory on --with-ddlog or in \$DDLOG_HOME])
-       fi
-       DDLOGLIBDIR=$DDLOG_HOME/lib
-       test -d "$DDLOG_HOME/bin" && DDLOG_PATH=$DDLOG_HOME/bin
-     elif test -f "$withval/lib/ddlog_std.dl"; then
-       # --with-ddlog=INSTALLDIR
-       DDLOGLIBDIR=$withval/lib
-       test -d "$withval/bin" && DDLOG_PATH=$withval/bin
-     elif test -f "$withval/ddlog_std.dl"; then
-       # --with-ddlog=LIBDIR
-       DDLOGLIBDIR=$withval/lib
-     else
-       AC_MSG_ERROR([$withval does not contain ddlog_std.dl or lib/ddlog_std.dl])
-     fi],
-    [DDLOGLIBDIR=no
-     DDLOG_PATH=no])
-
-  AC_MSG_CHECKING([for DDlog library directory])
-  AC_MSG_RESULT([$DDLOGLIBDIR])
-  if test "$DDLOGLIBDIR" != no; then
-    AC_ARG_VAR([DDLOG], [path to ddlog binary])
-    AC_PATH_PROGS([DDLOG], [ddlog], [none], [$DDLOG_PATH])
-    if test X"$DDLOG" = X"none"; then
-        AC_MSG_ERROR([ddlog is required to build with DDlog])
-    fi
-
-    AC_ARG_VAR([OVSDB2DDLOG], [path to ovsdb2ddlog binary])
-    AC_PATH_PROGS([OVSDB2DDLOG], [ovsdb2ddlog], [none], [$DDLOG_PATH])
-    if test X"$OVSDB2DDLOG" = X"none"; then
-        AC_MSG_ERROR([ovsdb2ddlog is required to build with DDlog])
-    fi
-
-    for tool in "$DDLOG" "$OVSDB2DDLOG"; do
-      AC_MSG_CHECKING([$tool version])
-      $tool --version >&AS_MESSAGE_LOG_FD 2>&1
-      tool_version=$($tool --version | sed -n 's/^.* v\([[0-9]][[^ ]]*\).*/\1/p')
-      AC_MSG_RESULT([$tool_version])
-      m4_if([$1], [], [], [
-          AS_CASE([$tool_version],
-              [$1 | $1.*], [],
-              [*], [AC_MSG_ERROR([DDlog version $1.x is required, but $tool is version $tool_version])])])
-    done
-
-    AC_ARG_VAR([CARGO])
-    AC_CHECK_PROGS([CARGO], [cargo], [none])
-    if test X"$CARGO" = X"none"; then
-        AC_MSG_ERROR([cargo is required to build with DDlog])
-    fi
-
-    AC_ARG_VAR([RUSTC])
-    AC_CHECK_PROGS([RUSTC], [rustc], [none])
-    if test X"$RUSTC" = X"none"; then
-        AC_MSG_ERROR([rustc is required to build with DDlog])
-    fi
-
-    AC_SUBST([DDLOGLIBDIR])
-    AC_DEFINE([DDLOG], [1], [Build OVN daemons with ddlog.])
-  fi
-
-  AM_CONDITIONAL([DDLOG], [test "$DDLOGLIBDIR" != no])
-])
 
 dnl Checks for net/if_dl.h.
 dnl
@@ -321,7 +242,7 @@ AC_DEFUN([OVS_ENABLE_SPARSE],
 
    AC_ARG_ENABLE(
      [sparse],
-     [AC_HELP_STRING([--enable-sparse], [Run "sparse" by default])],
+     [AS_HELP_STRING([--enable-sparse], [Run "sparse" by default])],
      [], [enable_sparse=no])
    AM_CONDITIONAL([ENABLE_SPARSE_BY_DEFAULT], [test $enable_sparse = yes])])
 
@@ -400,10 +321,10 @@ dnl
 dnl Check for OVS sources
 AC_DEFUN([OVN_CHECK_OVS], [
   AC_ARG_WITH([ovs-source],
-              [AC_HELP_STRING([--with-ovs-source=/path/to/ovs/src/dir],
+              [AS_HELP_STRING([--with-ovs-source=/path/to/ovs/src/dir],
                               [Specify the OVS src directory])])
   AC_ARG_WITH([ovs-build],
-              [AC_HELP_STRING([--with-ovs-build=/path/to/ovs/build/dir],
+              [AS_HELP_STRING([--with-ovs-build=/path/to/ovs/build/dir],
                               [Specify the OVS build directory])])
 
   AC_MSG_CHECKING([for OVS source directory])
@@ -412,7 +333,7 @@ AC_DEFUN([OVN_CHECK_OVS], [
   fi
   OVSDIR=$(cd "$(eval echo "$with_ovs_source")"; pwd)
   if test ! -f "$OVSDIR/vswitchd/bridge.c"; then
-    AC_ERROR([$OVSDIR is not an OVS source directory])
+    AC_MSG_ERROR([$OVSDIR is not an OVS source directory])
   fi
 
   AC_MSG_RESULT([$OVSDIR])
@@ -426,13 +347,16 @@ AC_DEFUN([OVN_CHECK_OVS], [
       *) OVSBUILDDIR=`pwd`/$OVSBUILDDIR ;;
     esac
     if test ! -f "$OVSBUILDDIR/config.h"; then
-      AC_ERROR([$OVSBUILDDIR is not a configured OVS build directory])
+      AC_MSG_ERROR([$OVSBUILDDIR is not a configured OVS build directory])
     fi
   elif test -f "$OVSDIR/config.h"; then
     # If separate build dir is not specified, use src dir.
     OVSBUILDDIR=$OVSDIR
   else
-    AC_ERROR([OVS source dir $OVSDIR is not configured as a build directory (either run configure there or use --with-ovs-build to point to the build directory)])
+    AC_MSG_ERROR(m4_normalize([
+        OVS source dir $OVSDIR is not configured as a build directory
+        (either run configure there or use --with-ovs-build to point
+        to the build directory)]))
   fi
   AC_MSG_RESULT([$OVSBUILDDIR])
   AC_SUBST(OVSBUILDDIR)
@@ -449,7 +373,7 @@ AC_DEFUN([OVN_CHECK_VIF_PLUG_PROVIDER], [
   AC_ARG_VAR([VIF_PLUG_PROVIDER])
   AC_ARG_WITH(
     [vif-plug-provider],
-    [AC_HELP_STRING([--with-vif-plug-provider=/path/to/provider/repository],
+    [AS_HELP_STRING([--with-vif-plug-provider=/path/to/provider/repository],
                     [Specify path to a configured and built VIF plug provider repository])],
     [if test "$withval" = yes; then
        if test -z "$VIF_PLUG_PROVIDER"; then
@@ -482,7 +406,7 @@ dnl Enable built-in plug providers
 AC_DEFUN([OVN_ENABLE_VIF_PLUG], [
     AC_ARG_ENABLE(
       [vif-plug-providers],
-      [AC_HELP_STRING([--enable-vif-plug-providers], [Enable building of built-in VIF plug providers])],
+      [AS_HELP_STRING([--enable-vif-plug-providers], [Enable building of built-in VIF plug providers])],
       [], [enable_vif_plug=no])
     AM_CONDITIONAL([ENABLE_VIF_PLUG], [test "$enable_vif_plug" != no])
     if test "$enable_vif_plug" != no; then

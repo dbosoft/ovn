@@ -18,16 +18,22 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/* OVS includes. */
 #include "lib/svec.h"
 #include "openvswitch/util.h"
 
+/* OVN includes. */
+#include "en-lr-nat.h"
+#include "en-global-config.h"
+#include "en-lr-stateful.h"
 #include "en-sync-sb.h"
-#include "include/ovn/expr.h"
+#include "lb.h"
 #include "lib/inc-proc-eng.h"
 #include "lib/lb.h"
 #include "lib/ovn-nb-idl.h"
 #include "lib/ovn-sb-idl.h"
 #include "lib/ovn-util.h"
+#include "lflow-mgr.h"
 #include "northd.h"
 
 #include "openvswitch/vlog.h"
@@ -35,16 +41,18 @@
 VLOG_DEFINE_THIS_MODULE(en_sync_to_sb);
 
 static void sync_addr_set(struct ovsdb_idl_txn *ovnsb_txn, const char *name,
-                          const char **addrs, size_t n_addrs,
+                          struct sorted_array *addresses,
                           struct shash *sb_address_sets);
 static void sync_addr_sets(struct ovsdb_idl_txn *ovnsb_txn,
                            const struct nbrec_address_set_table *,
                            const struct nbrec_port_group_table *,
                            const struct sbrec_address_set_table *,
-                           const struct ovn_datapaths *lr_datapaths);
+                           const struct lr_stateful_table *,
+                           const struct ovn_datapaths *,
+                           const char *svc_monitor_macp);
 static const struct sbrec_address_set *sb_address_set_lookup_by_name(
     struct ovsdb_idl_index *, const char *name);
-static void update_sb_addr_set(const char **nb_addresses, size_t n_addresses,
+static void update_sb_addr_set(struct sorted_array *,
                                const struct sbrec_address_set *);
 static void build_port_group_address_set(const struct nbrec_port_group *,
                                          struct svec *ipv4_addrs,
@@ -87,11 +95,16 @@ en_sync_to_sb_addr_set_run(struct engine_node *node, void *data OVS_UNUSED)
         EN_OVSDB_GET(engine_get_input("SB_address_set", node));
 
     const struct engine_context *eng_ctx = engine_get_context();
+    const struct ed_type_lr_stateful *lr_stateful_data =
+        engine_get_input_data("lr_stateful", node);
     struct northd_data *northd_data = engine_get_input_data("northd", node);
-
+    struct ed_type_global_config *global_config =
+        engine_get_input_data("global_config", node);
     sync_addr_sets(eng_ctx->ovnsb_idl_txn, nb_address_set_table,
                    nb_port_group_table, sb_address_set_table,
-                   &northd_data->lr_datapaths);
+                   &lr_stateful_data->table,
+                   &northd_data->lr_datapaths,
+                   global_config->svc_monitor_mac);
 
     engine_set_node_state(node, EN_UPDATED);
 }
@@ -133,8 +146,10 @@ sync_to_sb_addr_set_nb_address_set_handler(struct engine_node *node,
         if (!sb_addr_set) {
             return false;
         }
-        update_sb_addr_set((const char **) nb_addr_set->addresses,
-                           nb_addr_set->n_addresses, sb_addr_set);
+        struct sorted_array addrs =
+            sorted_array_from_dbrec(nb_addr_set, addresses);
+        update_sb_addr_set(&addrs, sb_addr_set);
+        sorted_array_destroy(&addrs);
     }
 
     return true;
@@ -180,24 +195,240 @@ sync_to_sb_addr_set_nb_port_group_handler(struct engine_node *node,
         struct svec ipv4_addrs = SVEC_EMPTY_INITIALIZER;
         struct svec ipv6_addrs = SVEC_EMPTY_INITIALIZER;
         build_port_group_address_set(nb_pg, &ipv4_addrs, &ipv6_addrs);
-        update_sb_addr_set((const char **) ipv4_addrs.names, ipv4_addrs.n,
-                           sb_addr_set_v4);
-        update_sb_addr_set((const char **) ipv6_addrs.names, ipv6_addrs.n,
-                           sb_addr_set_v6);
 
-        free(ipv4_addrs_name);
-        free(ipv6_addrs_name);
+        struct sorted_array ipv4_addrs_sorted =
+                sorted_array_from_svec(&ipv4_addrs);
+        struct sorted_array ipv6_addrs_sorted =
+                sorted_array_from_svec(&ipv6_addrs);
+
+        update_sb_addr_set(&ipv4_addrs_sorted, sb_addr_set_v4);
+        update_sb_addr_set(&ipv6_addrs_sorted, sb_addr_set_v6);
+
+        sorted_array_destroy(&ipv4_addrs_sorted);
+        sorted_array_destroy(&ipv6_addrs_sorted);
         svec_destroy(&ipv4_addrs);
         svec_destroy(&ipv6_addrs);
+        free(ipv4_addrs_name);
+        free(ipv6_addrs_name);
     }
 
+    return true;
+}
+
+/* sync_to_sb_lb engine node functions.
+ * This engine node syncs the SB load balancers.
+ */
+struct sb_lb_record {
+    struct hmap_node key_node;  /* Index on 'nblb->header_.uuid'. */
+
+    struct ovn_lb_datapaths *lb_dps;
+    const struct sbrec_load_balancer *sbrec_lb;
+    struct ovn_dp_group *ls_dpg;
+    struct ovn_dp_group *lr_dpg;
+    struct uuid sb_uuid;
+};
+
+struct sb_lb_table {
+    struct hmap entries; /* Stores struct sb_lb_record. */
+    struct hmap ls_dp_groups;
+    struct hmap lr_dp_groups;
+};
+
+struct ed_type_sync_to_sb_lb_data {
+    struct sb_lb_table sb_lbs;
+};
+
+static void sb_lb_table_init(struct sb_lb_table *);
+static void sb_lb_table_clear(struct sb_lb_table *);
+static void sb_lb_table_destroy(struct sb_lb_table *);
+
+static struct sb_lb_record *sb_lb_table_find(struct hmap *sb_lbs,
+                                             const struct uuid *);
+static void sb_lb_table_build_and_sync(struct sb_lb_table *,
+                                struct ovsdb_idl_txn *ovnsb_txn,
+                                const struct sbrec_load_balancer_table *,
+                                const struct sbrec_logical_dp_group_table *,
+                                struct hmap *lb_dps_map,
+                                struct ovn_datapaths *ls_datapaths,
+                                struct ovn_datapaths *lr_datapaths,
+                                struct chassis_features *);
+static bool sync_sb_lb_record(struct sb_lb_record *,
+                              const struct sbrec_load_balancer *,
+                              const struct sbrec_logical_dp_group_table *,
+                              struct sb_lb_table *,
+                              struct ovsdb_idl_txn *ovnsb_txn,
+                              struct ovn_datapaths *ls_datapaths,
+                              struct ovn_datapaths *lr_datapaths,
+                              struct chassis_features *);
+static bool sync_changed_lbs(struct sb_lb_table *,
+                             struct ovsdb_idl_txn *ovnsb_txn,
+                             const struct sbrec_load_balancer_table *,
+                             const struct sbrec_logical_dp_group_table *,
+                             struct tracked_lbs *,
+                             struct ovn_datapaths *ls_datapaths,
+                             struct ovn_datapaths *lr_datapaths,
+                             struct chassis_features *);
+static bool check_sb_lb_duplicates(const struct sbrec_load_balancer_table *);
+
+void *
+en_sync_to_sb_lb_init(struct engine_node *node OVS_UNUSED,
+                      struct engine_arg *arg OVS_UNUSED)
+{
+    struct ed_type_sync_to_sb_lb_data *data = xzalloc(sizeof *data);
+    sb_lb_table_init(&data->sb_lbs);
+
+    return data;
+}
+
+void
+en_sync_to_sb_lb_run(struct engine_node *node, void *data_)
+{
+    struct northd_data *northd_data = engine_get_input_data("northd", node);
+    const struct sbrec_load_balancer_table *sb_load_balancer_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+    const struct sbrec_logical_dp_group_table *sb_dpgrp_table =
+        EN_OVSDB_GET(engine_get_input("SB_logical_dp_group", node));
+    struct ed_type_global_config *global_config =
+        engine_get_input_data("global_config", node);
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct ed_type_sync_to_sb_lb_data *data = data_;
+
+    sb_lb_table_clear(&data->sb_lbs);
+    sb_lb_table_build_and_sync(&data->sb_lbs, eng_ctx->ovnsb_idl_txn,
+                               sb_load_balancer_table,
+                               sb_dpgrp_table,
+                               &northd_data->lb_datapaths_map,
+                               &northd_data->ls_datapaths,
+                               &northd_data->lr_datapaths,
+                               &global_config->features);
+
+    engine_set_node_state(node, EN_UPDATED);
+}
+
+void
+en_sync_to_sb_lb_cleanup(void *data_)
+{
+    struct ed_type_sync_to_sb_lb_data *data = data_;
+    sb_lb_table_destroy(&data->sb_lbs);
+}
+
+bool
+sync_to_sb_lb_northd_handler(struct engine_node *node, void *data_)
+{
+    struct northd_data *nd = engine_get_input_data("northd", node);
+
+    if (!northd_has_tracked_data(&nd->trk_data)) {
+        /* Return false if no tracking data. */
+        return false;
+    }
+
+    if (!northd_has_lbs_in_tracked_data(&nd->trk_data)) {
+        return true;
+    }
+
+    const struct engine_context *eng_ctx = engine_get_context();
+    const struct sbrec_logical_dp_group_table *sb_dpgrp_table =
+        EN_OVSDB_GET(engine_get_input("SB_logical_dp_group", node));
+    const struct sbrec_load_balancer_table *sb_lb_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+    struct ed_type_global_config *global_config =
+        engine_get_input_data("global_config", node);
+    struct ed_type_sync_to_sb_lb_data *data = data_;
+
+    if (!sync_changed_lbs(&data->sb_lbs, eng_ctx->ovnsb_idl_txn, sb_lb_table,
+                          sb_dpgrp_table, &nd->trk_data.trk_lbs,
+                          &nd->ls_datapaths, &nd->lr_datapaths,
+                          &global_config->features)) {
+        return false;
+    }
+
+    engine_set_node_state(node, EN_UPDATED);
+    return true;
+}
+
+bool
+sync_to_sb_lb_sb_load_balancer(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct sbrec_load_balancer_table *sb_load_balancer_table =
+        EN_OVSDB_GET(engine_get_input("SB_load_balancer", node));
+
+    /* The only reason to handle SB.Load_Balancer updates is to detect
+     * spurious records being created in clustered databases due to
+     * lack of indexing on the SB.Load_Balancer table.  All other changes
+     * are valid and performed by northd, the only write-client for
+     * this table. */
+    if (check_sb_lb_duplicates(sb_load_balancer_table)) {
+        return false;
+    }
+    return true;
+}
+
+/* sync_to_sb_pb engine node functions.
+ * This engine node syncs the SB Port Bindings (partly).
+ * en_northd engine create the SB Port binding rows and
+ * updates most of the columns.
+ * This engine node updates the port binding columns which
+ * needs to be updated after northd engine is run.
+ */
+
+void *
+en_sync_to_sb_pb_init(struct engine_node *node OVS_UNUSED,
+                      struct engine_arg *arg OVS_UNUSED)
+{
+    return NULL;
+}
+
+void
+en_sync_to_sb_pb_run(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct engine_context *eng_ctx = engine_get_context();
+    struct northd_data *northd_data = engine_get_input_data("northd", node);
+    struct ed_type_lr_stateful *lr_stateful_data =
+        engine_get_input_data("lr_stateful", node);
+
+    sync_pbs(eng_ctx->ovnsb_idl_txn, &northd_data->ls_ports,
+             &northd_data->lr_ports,
+             &lr_stateful_data->table);
+    engine_set_node_state(node, EN_UPDATED);
+}
+
+void
+en_sync_to_sb_pb_cleanup(void *data OVS_UNUSED)
+{
+
+}
+
+bool
+sync_to_sb_pb_northd_handler(struct engine_node *node, void *data OVS_UNUSED)
+{
+    const struct engine_context *eng_ctx = engine_get_context();
+    if (!eng_ctx->ovnsb_idl_txn) {
+        return false;
+    }
+
+    struct northd_data *nd = engine_get_input_data("northd", node);
+    if (!northd_has_tracked_data(&nd->trk_data) ||
+            northd_has_lbs_in_tracked_data(&nd->trk_data)) {
+        /* Return false if no tracking data or if lbs changed. */
+        return false;
+    }
+
+    struct ed_type_lr_stateful *lr_stateful_data =
+        engine_get_input_data("lr_stateful", node);
+
+    if (!sync_pbs_for_northd_changed_ovn_ports(&nd->trk_data.trk_lsps,
+                                               &lr_stateful_data->table)) {
+        return false;
+    }
+
+    engine_set_node_state(node, EN_UPDATED);
     return true;
 }
 
 /* static functions. */
 static void
 sync_addr_set(struct ovsdb_idl_txn *ovnsb_txn, const char *name,
-              const char **addrs, size_t n_addrs,
+              struct sorted_array *addresses,
               struct shash *sb_address_sets)
 {
     const struct sbrec_address_set *sb_address_set;
@@ -206,10 +437,10 @@ sync_addr_set(struct ovsdb_idl_txn *ovnsb_txn, const char *name,
     if (!sb_address_set) {
         sb_address_set = sbrec_address_set_insert(ovnsb_txn);
         sbrec_address_set_set_name(sb_address_set, name);
-        sbrec_address_set_set_addresses(sb_address_set,
-                                        addrs, n_addrs);
+        sbrec_address_set_set_addresses(sb_address_set, addresses->arr,
+                                        addresses->n);
     } else {
-        update_sb_addr_set(addrs, n_addrs, sb_address_set);
+        update_sb_addr_set(addresses, sb_address_set);
     }
 }
 
@@ -232,7 +463,9 @@ sync_addr_sets(struct ovsdb_idl_txn *ovnsb_txn,
                const struct nbrec_address_set_table *nb_address_set_table,
                const struct nbrec_port_group_table *nb_port_group_table,
                const struct sbrec_address_set_table *sb_address_set_table,
-               const struct ovn_datapaths *lr_datapaths)
+               const struct lr_stateful_table *lr_statefuls,
+               const struct ovn_datapaths *lr_datapaths,
+               const char *svc_monitor_macp)
 {
     struct shash sb_address_sets = SHASH_INITIALIZER(&sb_address_sets);
 
@@ -243,9 +476,9 @@ sync_addr_sets(struct ovsdb_idl_txn *ovnsb_txn,
     }
 
     /* Service monitor MAC. */
-    const char *svc_monitor_macp = northd_get_svc_monitor_mac();
-    sync_addr_set(ovnsb_txn, "svc_monitor_mac", &svc_monitor_macp, 1,
-                     &sb_address_sets);
+    struct sorted_array svc = sorted_array_create(&svc_monitor_macp, 1, false);
+    sync_addr_set(ovnsb_txn, "svc_monitor_mac", &svc, &sb_address_sets);
+    sorted_array_destroy(&svc);
 
     /* sync port group generated address sets first */
     const struct nbrec_port_group *nb_port_group;
@@ -256,49 +489,53 @@ sync_addr_sets(struct ovsdb_idl_txn *ovnsb_txn,
         build_port_group_address_set(nb_port_group, &ipv4_addrs, &ipv6_addrs);
         char *ipv4_addrs_name = xasprintf("%s_ip4", nb_port_group->name);
         char *ipv6_addrs_name = xasprintf("%s_ip6", nb_port_group->name);
+
+        struct sorted_array ipv4_addrs_sorted =
+                sorted_array_from_svec(&ipv4_addrs);
+        struct sorted_array ipv6_addrs_sorted =
+                sorted_array_from_svec(&ipv6_addrs);
+
         sync_addr_set(ovnsb_txn, ipv4_addrs_name,
-                      /* "char **" is not compatible with "const char **" */
-                      (const char **) ipv4_addrs.names,
-                      ipv4_addrs.n, &sb_address_sets);
+                      &ipv4_addrs_sorted, &sb_address_sets);
         sync_addr_set(ovnsb_txn, ipv6_addrs_name,
-                      /* "char **" is not compatible with "const char **" */
-                      (const char **) ipv6_addrs.names,
-                      ipv6_addrs.n, &sb_address_sets);
-        free(ipv4_addrs_name);
-        free(ipv6_addrs_name);
+                      &ipv6_addrs_sorted, &sb_address_sets);
+        sorted_array_destroy(&ipv4_addrs_sorted);
+        sorted_array_destroy(&ipv6_addrs_sorted);
         svec_destroy(&ipv4_addrs);
         svec_destroy(&ipv6_addrs);
+        free(ipv4_addrs_name);
+        free(ipv6_addrs_name);
     }
 
     /* Sync router load balancer VIP generated address sets. */
-    struct ovn_datapath *od;
-    HMAP_FOR_EACH (od, key_node, &lr_datapaths->datapaths) {
-        ovs_assert(od->nbr);
+    const struct lr_stateful_record *lr_stateful_rec;
+    LR_STATEFUL_TABLE_FOR_EACH (lr_stateful_rec, lr_statefuls) {
+        const struct ovn_datapath *od =
+            ovn_datapaths_find_by_index(lr_datapaths,
+                                        lr_stateful_rec->lr_index);
+        if (sset_count(&lr_stateful_rec->lb_ips->ips_v4_reachable)) {
+            char *ipv4_addrs_name =
+                lr_lb_address_set_name(od->tunnel_key, AF_INET);
 
-        if (sset_count(&od->lb_ips->ips_v4_reachable)) {
-            char *ipv4_addrs_name = lr_lb_address_set_name(od->tunnel_key,
-                                                           AF_INET);
-            const char **ipv4_addrs =
-                sset_array(&od->lb_ips->ips_v4_reachable);
+            struct sorted_array ipv4_addrs_sorted = sorted_array_from_sset(
+                &lr_stateful_rec->lb_ips->ips_v4_reachable);
 
-            sync_addr_set(ovnsb_txn, ipv4_addrs_name, ipv4_addrs,
-                          sset_count(&od->lb_ips->ips_v4_reachable),
-                          &sb_address_sets);
+            sync_addr_set(ovnsb_txn, ipv4_addrs_name,
+                          &ipv4_addrs_sorted, &sb_address_sets);
+            sorted_array_destroy(&ipv4_addrs_sorted);
             free(ipv4_addrs_name);
-            free(ipv4_addrs);
         }
 
-        if (sset_count(&od->lb_ips->ips_v6_reachable)) {
-            char *ipv6_addrs_name = lr_lb_address_set_name(od->tunnel_key,
-                                                           AF_INET6);
-            const char **ipv6_addrs =
-                sset_array(&od->lb_ips->ips_v6_reachable);
+        if (sset_count(&lr_stateful_rec->lb_ips->ips_v6_reachable)) {
+            char *ipv6_addrs_name =
+                lr_lb_address_set_name(od->tunnel_key, AF_INET6);
+            struct sorted_array ipv6_addrs_sorted = sorted_array_from_sset(
+                &lr_stateful_rec->lb_ips->ips_v6_reachable);
 
-            sync_addr_set(ovnsb_txn, ipv6_addrs_name, ipv6_addrs,
-                          sset_count(&od->lb_ips->ips_v6_reachable),
-                          &sb_address_sets);
+            sync_addr_set(ovnsb_txn, ipv6_addrs_name,
+                          &ipv6_addrs_sorted, &sb_address_sets);
+            sorted_array_destroy(&ipv6_addrs_sorted);
             free(ipv6_addrs_name);
-            free(ipv6_addrs);
         }
     }
 
@@ -307,10 +544,11 @@ sync_addr_sets(struct ovsdb_idl_txn *ovnsb_txn,
     const struct nbrec_address_set *nb_address_set;
     NBREC_ADDRESS_SET_TABLE_FOR_EACH (nb_address_set,
                                       nb_address_set_table) {
+        struct sorted_array addrs =
+                sorted_array_from_dbrec(nb_address_set, addresses);
         sync_addr_set(ovnsb_txn, nb_address_set->name,
-            /* "char **" is not compatible with "const char **" */
-            (const char **) nb_address_set->addresses,
-            nb_address_set->n_addresses, &sb_address_sets);
+                      &addrs, &sb_address_sets);
+        sorted_array_destroy(&addrs);
     }
 
     struct shash_node *node;
@@ -322,48 +560,25 @@ sync_addr_sets(struct ovsdb_idl_txn *ovnsb_txn,
 }
 
 static void
-update_sb_addr_set(const char **nb_addresses, size_t n_addresses,
+sb_addr_set_apply_diff(const void *arg, const char *item, bool add)
+{
+    const struct sbrec_address_set *as = arg;
+    if (add) {
+        sbrec_address_set_update_addresses_addvalue(as, item);
+    } else {
+        sbrec_address_set_update_addresses_delvalue(as, item);
+    }
+}
+
+static void
+update_sb_addr_set(struct sorted_array *nb_addresses,
                    const struct sbrec_address_set *sb_as)
 {
-    struct expr_constant_set *cs_nb_as =
-        expr_constant_set_create_integers(
-            (const char *const *) nb_addresses, n_addresses);
-    struct expr_constant_set *cs_sb_as =
-        expr_constant_set_create_integers(
-            (const char *const *) sb_as->addresses, sb_as->n_addresses);
-
-    struct expr_constant_set *addr_added = NULL;
-    struct expr_constant_set *addr_deleted = NULL;
-    expr_constant_set_integers_diff(cs_sb_as, cs_nb_as, &addr_added,
-                                    &addr_deleted);
-
-    struct ds ds = DS_EMPTY_INITIALIZER;
-    if (addr_added && addr_added->n_values) {
-        for (size_t i = 0; i < addr_added->n_values; i++) {
-            ds_clear(&ds);
-            expr_constant_format(&addr_added->values[i], EXPR_C_INTEGER, &ds);
-            sbrec_address_set_update_addresses_addvalue(sb_as, ds_cstr(&ds));
-        }
-    }
-
-    if (addr_deleted && addr_deleted->n_values) {
-        for (size_t i = 0; i < addr_deleted->n_values; i++) {
-            ds_clear(&ds);
-            expr_constant_format(&addr_deleted->values[i],
-                                 EXPR_C_INTEGER, &ds);
-            sbrec_address_set_update_addresses_delvalue(sb_as, ds_cstr(&ds));
-        }
-    }
-
-    ds_destroy(&ds);
-    expr_constant_set_destroy(cs_nb_as);
-    free(cs_nb_as);
-    expr_constant_set_destroy(cs_sb_as);
-    free(cs_sb_as);
-    expr_constant_set_destroy(addr_added);
-    free(addr_added);
-    expr_constant_set_destroy(addr_deleted);
-    free(addr_deleted);
+    struct sorted_array sb_addresses =
+        sorted_array_from_dbrec(sb_as, addresses);
+    sorted_array_apply_diff(nb_addresses, &sb_addresses,
+                            sb_addr_set_apply_diff, sb_as);
+    sorted_array_destroy(&sb_addresses);
 }
 
 static void
@@ -401,4 +616,388 @@ sb_address_set_lookup_by_name(struct ovsdb_idl_index *sbrec_addr_set_by_name,
     sbrec_address_set_index_destroy_row(target);
 
     return retval;
+}
+
+/* static functions related to sync_to_sb_lb */
+
+static void
+sb_lb_table_init(struct sb_lb_table *sb_lbs)
+{
+    hmap_init(&sb_lbs->entries);
+    ovn_dp_groups_init(&sb_lbs->ls_dp_groups);
+    ovn_dp_groups_init(&sb_lbs->lr_dp_groups);
+}
+
+static void
+sb_lb_table_clear(struct sb_lb_table *sb_lbs)
+{
+    struct sb_lb_record *sb_lb;
+    HMAP_FOR_EACH_POP (sb_lb, key_node, &sb_lbs->entries) {
+        free(sb_lb);
+    }
+
+    ovn_dp_groups_clear(&sb_lbs->ls_dp_groups);
+    ovn_dp_groups_clear(&sb_lbs->lr_dp_groups);
+}
+
+static void
+sb_lb_table_destroy(struct sb_lb_table *sb_lbs)
+{
+    sb_lb_table_clear(sb_lbs);
+    hmap_destroy(&sb_lbs->entries);
+    ovn_dp_groups_destroy(&sb_lbs->ls_dp_groups);
+    ovn_dp_groups_destroy(&sb_lbs->lr_dp_groups);
+}
+
+static struct sb_lb_record *
+sb_lb_table_find(struct hmap *sb_lbs, const struct uuid *lb_uuid)
+{
+    struct sb_lb_record *sb_lb;
+    HMAP_FOR_EACH_WITH_HASH (sb_lb, key_node, uuid_hash(lb_uuid),
+                             sb_lbs) {
+        if (uuid_equals(&sb_lb->lb_dps->lb->nlb->header_.uuid, lb_uuid)) {
+            return sb_lb;
+        }
+    }
+
+    return NULL;
+}
+
+static void
+sb_lb_table_build_and_sync(
+    struct sb_lb_table *sb_lbs, struct ovsdb_idl_txn *ovnsb_txn,
+    const struct sbrec_load_balancer_table *sb_lb_table,
+    const struct sbrec_logical_dp_group_table *sb_dpgrp_table,
+    struct hmap *lb_dps_map, struct ovn_datapaths *ls_datapaths,
+    struct ovn_datapaths *lr_datapaths,
+    struct chassis_features *chassis_features)
+{
+    struct hmap tmp_sb_lbs = HMAP_INITIALIZER(&tmp_sb_lbs);
+    struct ovn_lb_datapaths *lb_dps;
+    struct sb_lb_record *sb_lb;
+
+    HMAP_FOR_EACH (lb_dps, hmap_node, lb_dps_map) {
+        if (!lb_dps->n_nb_ls && !lb_dps->n_nb_lr) {
+            continue;
+        }
+
+        sb_lb = xzalloc(sizeof *sb_lb);
+        sb_lb->lb_dps = lb_dps;
+        hmap_insert(&tmp_sb_lbs, &sb_lb->key_node,
+                    uuid_hash(&lb_dps->lb->nlb->header_.uuid));
+    }
+
+    const struct sbrec_load_balancer *sbrec_lb;
+    SBREC_LOAD_BALANCER_TABLE_FOR_EACH_SAFE (sbrec_lb,
+                                             sb_lb_table) {
+        const char *nb_lb_uuid = smap_get(&sbrec_lb->external_ids, "lb_id");
+        struct uuid lb_uuid;
+        if (!nb_lb_uuid || !uuid_from_string(&lb_uuid, nb_lb_uuid)) {
+            sbrec_load_balancer_delete(sbrec_lb);
+            continue;
+        }
+
+        sb_lb = sb_lb_table_find(&tmp_sb_lbs, &lb_uuid);
+        if (sb_lb) {
+            sb_lb->sbrec_lb = sbrec_lb;
+            bool success = sync_sb_lb_record(sb_lb, sbrec_lb, sb_dpgrp_table,
+                                             sb_lbs, ovnsb_txn, ls_datapaths,
+                                             lr_datapaths, chassis_features);
+            /* Since we are rebuilding and syncing,  sync_sb_lb_record should
+             * not return false. */
+            ovs_assert(success);
+
+            hmap_remove(&tmp_sb_lbs, &sb_lb->key_node);
+            hmap_insert(&sb_lbs->entries, &sb_lb->key_node,
+                        uuid_hash(&sb_lb->lb_dps->lb->nlb->header_.uuid));
+        } else {
+            sbrec_load_balancer_delete(sbrec_lb);
+        }
+    }
+
+    HMAP_FOR_EACH_POP (sb_lb, key_node, &tmp_sb_lbs) {
+        bool success = sync_sb_lb_record(sb_lb, NULL, sb_dpgrp_table, sb_lbs,
+                                         ovnsb_txn, ls_datapaths, lr_datapaths,
+                                         chassis_features);
+        /* Since we are rebuilding and syncing,  sync_sb_lb_record should not
+         * return false. */
+        ovs_assert(success);
+
+        hmap_insert(&sb_lbs->entries, &sb_lb->key_node,
+                    uuid_hash(&sb_lb->lb_dps->lb->nlb->header_.uuid));
+    }
+
+    hmap_destroy(&tmp_sb_lbs);
+}
+
+static bool
+sync_sb_lb_record(struct sb_lb_record *sb_lb,
+                  const struct sbrec_load_balancer *sbrec_lb,
+                  const struct sbrec_logical_dp_group_table *sb_dpgrp_table,
+                  struct sb_lb_table *sb_lbs,
+                  struct ovsdb_idl_txn *ovnsb_txn,
+                  struct ovn_datapaths *ls_datapaths,
+                  struct ovn_datapaths *lr_datapaths,
+                  struct chassis_features *chassis_features)
+{
+    struct sbrec_logical_dp_group *sbrec_ls_dp_group = NULL;
+    struct sbrec_logical_dp_group *sbrec_lr_dp_group = NULL;
+    const struct ovn_lb_datapaths *lb_dps;
+    struct ovn_dp_group *pre_sync_ls_dpg;
+    struct ovn_dp_group *pre_sync_lr_dpg;
+
+    lb_dps = sb_lb->lb_dps;
+    pre_sync_ls_dpg = sb_lb->ls_dpg;
+    pre_sync_lr_dpg = sb_lb->lr_dpg;
+
+    if (!sbrec_lb) {
+        sb_lb->sb_uuid = uuid_random();
+        sbrec_lb =  sbrec_load_balancer_insert_persist_uuid(ovnsb_txn,
+                                                            &sb_lb->sb_uuid);
+        char *lb_id = xasprintf(
+            UUID_FMT, UUID_ARGS(&lb_dps->lb->nlb->header_.uuid));
+        const struct smap external_ids =
+            SMAP_CONST1(&external_ids, "lb_id", lb_id);
+        sbrec_load_balancer_set_external_ids(sbrec_lb, &external_ids);
+        free(lb_id);
+    } else {
+        sb_lb->sb_uuid = sbrec_lb->header_.uuid;
+        sbrec_ls_dp_group =
+            chassis_features->ls_dpg_column
+            ? sbrec_lb->ls_datapath_group
+            : sbrec_lb->datapath_group; /* deprecated */
+
+        sbrec_lr_dp_group = sbrec_lb->lr_datapath_group;
+    }
+
+    if (lb_dps->n_nb_ls) {
+        sb_lb->ls_dpg = ovn_dp_group_get(&sb_lbs->ls_dp_groups,
+                                         lb_dps->n_nb_ls,
+                                         lb_dps->nb_ls_map,
+                                         ods_size(ls_datapaths));
+        if (sb_lb->ls_dpg) {
+            /* Update the dpg's sb dp_group. */
+            sb_lb->ls_dpg->dp_group =
+                sbrec_logical_dp_group_table_get_for_uuid(sb_dpgrp_table,
+                                                    &sb_lb->ls_dpg->dpg_uuid);
+            if (!sb_lb->ls_dpg->dp_group) {
+                /* Ideally this should not happen.  But it can still happen
+                 * due to 2 reasons:
+                 * 1. There is a bug in the dp_group management.  We should
+                 *    perhaps assert here.
+                 * 2. A User or CMS may delete the logical_dp_groups in SB DB
+                 *    or clear the SB:Load_balancer.ls_datapath_group column
+                 *    (intentionally or accidentally)
+                 *
+                 * Because of (2) it is better to return false instead of
+                 * assert,so that we recover from th inconsistent SB DB.
+                 */
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl, "SB Load balancer [%s]'s ls_dp_group column "
+                            "is not set (which is unexpected).  It should "
+                            "have been referencing the dp group ["UUID_FMT"]",
+                            sb_lb->lb_dps->lb->nlb->name,
+                            UUID_ARGS(&sb_lb->ls_dpg->dpg_uuid));
+                return false;
+            }
+        } else {
+            sb_lb->ls_dpg = ovn_dp_group_create(
+                ovnsb_txn, &sb_lbs->ls_dp_groups, sbrec_ls_dp_group,
+                lb_dps->n_nb_ls, lb_dps->nb_ls_map,
+                ods_size(ls_datapaths), true,
+                ls_datapaths, lr_datapaths);
+        }
+
+        if (chassis_features->ls_dpg_column) {
+            sbrec_load_balancer_set_ls_datapath_group(sbrec_lb,
+                                                      sb_lb->ls_dpg->dp_group);
+            sbrec_load_balancer_set_datapath_group(sbrec_lb, NULL);
+        } else {
+            /* datapath_group column is deprecated. */
+            sbrec_load_balancer_set_ls_datapath_group(sbrec_lb, NULL);
+            sbrec_load_balancer_set_datapath_group(sbrec_lb,
+                                                   sb_lb->ls_dpg->dp_group);
+
+        }
+    } else {
+        sbrec_load_balancer_set_ls_datapath_group(sbrec_lb, NULL);
+        sbrec_load_balancer_set_datapath_group(sbrec_lb, NULL);
+    }
+
+
+    if (lb_dps->n_nb_lr) {
+        sb_lb->lr_dpg = ovn_dp_group_get(&sb_lbs->lr_dp_groups,
+                                         lb_dps->n_nb_lr,
+                                         lb_dps->nb_lr_map,
+                                         ods_size(lr_datapaths));
+        if (sb_lb->lr_dpg) {
+            /* Update the dpg's sb dp_group. */
+            sb_lb->lr_dpg->dp_group =
+                sbrec_logical_dp_group_table_get_for_uuid(sb_dpgrp_table,
+                                                    &sb_lb->lr_dpg->dpg_uuid);
+            if (!sb_lb->lr_dpg->dp_group) {
+                /* Ideally this should not happen.  But it can still happen
+                 * due to 2 reasons:
+                 * 1. There is a bug in the dp_group management.  We should
+                 *    perhaps assert here.
+                 * 2. A User or CMS may delete the logical_dp_groups in SB DB
+                 *    or clear the SB:Load_balancer.lr_datapath_group column
+                 *    (intentionally or accidentally)
+                 *
+                 * Because of (2) it is better to return false instead of
+                 * assert,so that we recover from th inconsistent SB DB.
+                 */
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl, "SB Load balancer [%s]'s lr_dp_group column "
+                            "is not set (which is unexpected).  It should "
+                            "have been referencing the dp group ["UUID_FMT"]",
+                            sb_lb->lb_dps->lb->nlb->name,
+                            UUID_ARGS(&sb_lb->lr_dpg->dpg_uuid));
+                return false;
+            }
+        } else {
+            sb_lb->lr_dpg = ovn_dp_group_create(
+                ovnsb_txn, &sb_lbs->lr_dp_groups, sbrec_lr_dp_group,
+                lb_dps->n_nb_lr, lb_dps->nb_lr_map,
+                ods_size(lr_datapaths), false,
+                ls_datapaths, lr_datapaths);
+        }
+
+        sbrec_load_balancer_set_lr_datapath_group(sbrec_lb,
+                                                  sb_lb->lr_dpg->dp_group);
+    } else {
+        sbrec_load_balancer_set_lr_datapath_group(sbrec_lb, NULL);
+    }
+
+    if (pre_sync_ls_dpg != sb_lb->ls_dpg) {
+        if (sb_lb->ls_dpg) {
+            inc_ovn_dp_group_ref(sb_lb->ls_dpg);
+        }
+        if (pre_sync_ls_dpg) {
+            dec_ovn_dp_group_ref(&sb_lbs->ls_dp_groups, pre_sync_ls_dpg);
+        }
+    }
+
+    if (pre_sync_lr_dpg != sb_lb->lr_dpg) {
+        if (sb_lb->lr_dpg) {
+            inc_ovn_dp_group_ref(sb_lb->lr_dpg);
+        }
+        if (pre_sync_lr_dpg) {
+            dec_ovn_dp_group_ref(&sb_lbs->lr_dp_groups, pre_sync_lr_dpg);
+        }
+    }
+
+    /* Update columns. */
+    sbrec_load_balancer_set_name(sbrec_lb, lb_dps->lb->nlb->name);
+    sbrec_load_balancer_set_vips(sbrec_lb,
+                                 ovn_northd_lb_get_vips(lb_dps->lb));
+    sbrec_load_balancer_set_protocol(sbrec_lb, lb_dps->lb->nlb->protocol);
+
+    /* Store the fact that northd provides the original (destination IP +
+     * transport port) tuple.
+     */
+    struct smap options;
+    smap_clone(&options, &lb_dps->lb->nlb->options);
+    smap_replace(&options, "hairpin_orig_tuple", "true");
+    sbrec_load_balancer_set_options(sbrec_lb, &options);
+    /* Clearing 'datapaths' column, since 'dp_group' is in use. */
+    sbrec_load_balancer_set_datapaths(sbrec_lb, NULL, 0);
+    smap_destroy(&options);
+
+    return true;
+}
+
+static bool
+sync_changed_lbs(struct sb_lb_table *sb_lbs,
+                 struct ovsdb_idl_txn *ovnsb_txn,
+                 const struct sbrec_load_balancer_table *sb_lb_table,
+                 const struct sbrec_logical_dp_group_table *sb_dpgrp_table,
+                 struct tracked_lbs *trk_lbs,
+                 struct ovn_datapaths *ls_datapaths,
+                 struct ovn_datapaths *lr_datapaths,
+                 struct chassis_features *chassis_features)
+{
+    struct ovn_lb_datapaths *lb_dps;
+    struct hmapx_node *hmapx_node;
+    struct sb_lb_record *sb_lb;
+
+    HMAPX_FOR_EACH (hmapx_node, &trk_lbs->deleted) {
+        lb_dps = hmapx_node->data;
+
+        sb_lb = sb_lb_table_find(&sb_lbs->entries,
+                                 &lb_dps->lb->nlb->header_.uuid);
+        if (sb_lb) {
+            const struct sbrec_load_balancer *sbrec_lb =
+                sbrec_load_balancer_table_get_for_uuid(sb_lb_table,
+                                                       &sb_lb->sb_uuid);
+            if (sbrec_lb) {
+                sbrec_load_balancer_delete(sbrec_lb);
+            }
+
+            hmap_remove(&sb_lbs->entries, &sb_lb->key_node);
+            free(sb_lb);
+        }
+    }
+
+    HMAPX_FOR_EACH (hmapx_node, &trk_lbs->crupdated) {
+        lb_dps = hmapx_node->data;
+
+        sb_lb = sb_lb_table_find(&sb_lbs->entries,
+                                 &lb_dps->lb->nlb->header_.uuid);
+
+        if (!sb_lb && !lb_dps->n_nb_ls && !lb_dps->n_nb_lr) {
+            continue;
+        }
+
+        if (!sb_lb) {
+            sb_lb = xzalloc(sizeof *sb_lb);
+            sb_lb->lb_dps = lb_dps;
+            hmap_insert(&sb_lbs->entries, &sb_lb->key_node,
+                        uuid_hash(&lb_dps->lb->nlb->header_.uuid));
+        } else {
+            sb_lb->sbrec_lb =
+                sbrec_load_balancer_table_get_for_uuid(sb_lb_table,
+                                                       &sb_lb->sb_uuid);
+        }
+
+        if (sb_lb && !lb_dps->n_nb_ls && !lb_dps->n_nb_lr) {
+            const struct sbrec_load_balancer *sbrec_lb =
+                sbrec_load_balancer_table_get_for_uuid(sb_lb_table,
+                                                       &sb_lb->sb_uuid);
+            if (sbrec_lb) {
+                sbrec_load_balancer_delete(sbrec_lb);
+            }
+
+            hmap_remove(&sb_lbs->entries, &sb_lb->key_node);
+            free(sb_lb);
+        }
+
+        if (!sync_sb_lb_record(sb_lb, sb_lb->sbrec_lb, sb_dpgrp_table, sb_lbs,
+                               ovnsb_txn, ls_datapaths, lr_datapaths,
+                               chassis_features)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool
+check_sb_lb_duplicates(const struct sbrec_load_balancer_table *table)
+{
+    struct sset existing_nb_lb_uuids =
+        SSET_INITIALIZER(&existing_nb_lb_uuids);
+    const struct sbrec_load_balancer *sbrec_lb;
+    bool duplicates = false;
+
+    SBREC_LOAD_BALANCER_TABLE_FOR_EACH (sbrec_lb, table) {
+        const char *nb_lb_uuid = smap_get(&sbrec_lb->external_ids, "lb_id");
+        if (nb_lb_uuid && !sset_add(&existing_nb_lb_uuids, nb_lb_uuid)) {
+            duplicates = true;
+            break;
+        }
+    }
+
+    sset_destroy(&existing_nb_lb_uuids);
+    return duplicates;
 }

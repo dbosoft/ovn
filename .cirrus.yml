@@ -1,46 +1,68 @@
-arm_unit_tests_task:
+compute_engine_instance:
+  image_project: ubuntu-os-cloud
+  image: family/ubuntu-2304-arm64
+  architecture: arm64
+  platform: linux
+  memory: 4G
 
-  arm_container:
-    image: quay.io/fedora/fedora:37
-    memory: 4G
-    cpu: 2
+# Run separate task for the image build, so it's running only once outside
+# the test matrix.
+build_image_task:
+  install_dependencies_script:
+    - sudo apt update
+    - sudo apt install -y podman make
+
+  build_container_script:
+    - cd utilities/containers
+    - make ubuntu
+    - podman save -o /tmp/image.tar ovn-org/ovn-tests:ubuntu
+
+  upload_image_script:
+    - curl -s -X POST -T /tmp/image.tar http://$CIRRUS_HTTP_CACHE_HOST/${CIRRUS_CHANGE_IN_REPO}
+
+arm_unit_tests_task:
+  depends_on:
+    - build_image
 
   env:
-    ARCH: aarch64
     CIRRUS_CLONE_SUBMODULES: true
     PATH: ${HOME}/bin:${HOME}/.local/bin:${PATH}
-    DEPENDENCIES: autoconf automake clang curl ethtool gcc git
-      glibc-langpack-en groff iproute iproute-tc iputils libcap-ng-devel
-      libtool net-tools nmap-ncat openssl openssl-devel python3-devel
-      python3-pip python3-sphinx tcpdump unbound unbound-devel wget
+    RECHECK: yes
+    IMAGE_NAME: ovn-org/ovn-tests:ubuntu
     matrix:
       - CC: gcc
         TESTSUITE: test
-        TEST_RANGE: -500
+        TEST_RANGE: -300
       - CC: gcc
         TESTSUITE: test
-        TEST_RANGE: 501-1000
+        TEST_RANGE: 301-600
       - CC: gcc
         TESTSUITE: test
-        TEST_RANGE: 1001-
+        TEST_RANGE: 601-
+        UNSTABLE: yes
       - CC: clang
         TESTSUITE: test
-        TEST_RANGE: -500
+        TEST_RANGE: -300
       - CC: clang
         TESTSUITE: test
-        TEST_RANGE: 501-1000
+        TEST_RANGE: 301-600
       - CC: clang
         TESTSUITE: test
-        TEST_RANGE: 1001-
+        TEST_RANGE: 601-
+        UNSTABLE: yes
 
   name: ARM64 ${CC} ${TESTSUITE} ${TEST_RANGE}
 
-  dependencies_script:
-    - dnf -y update
-    - dnf -y install ${DEPENDENCIES}
+  install_dependencies_script:
+    - sudo apt update
+    - sudo apt install -y podman
 
-  prepare_script:
-    - ./.ci/linux-prepare.sh
+  download_cache_script:
+    - curl http://$CIRRUS_HTTP_CACHE_HOST/${CIRRUS_CHANGE_IN_REPO} -o /tmp/image.tar
+
+  load_image_script:
+    - podman load -i /tmp/image.tar
+    - rm -rf /tmp/image.tar
 
   build_script:
-    - ./.ci/linux-build.sh
+    - ./.ci/ci.sh --archive-logs

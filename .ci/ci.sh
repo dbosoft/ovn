@@ -16,13 +16,14 @@
 
 OVN_PATH=${OVN_PATH:-$PWD}
 OVS_PATH=${OVS_PATH:-$OVN_PATH/ovs}
+DPDK_PATH=${DPDK_PATH:-$OVN_PATH/dpdk-dir}
 CONTAINER_CMD=${CONTAINER_CMD:-podman}
 CONTAINER_WORKSPACE="/workspace"
 CONTAINER_WORKDIR="/workspace/ovn-tmp"
 IMAGE_NAME=${IMAGE_NAME:-"ovn-org/ovn-tests"}
 
 # Test variables
-ARCH=${ARCH:-$(uname -i)}
+ARCH=${ARCH:-$(uname -m)}
 CC=${CC:-gcc}
 
 
@@ -36,9 +37,37 @@ function container_shell() {
     ${CONTAINER_CMD} exec "-i$USE_TTY" "$CONTAINER_ID" /bin/bash
 }
 
+function archive_logs() {
+    if [ -z "$archive_logs" ]; then
+        return 0;
+    fi
+
+    log_dir=$CONTAINER_WORKSPACE/logs/
+    container_exec "
+        mkdir $log_dir \
+        && \
+        cp $CONTAINER_WORKDIR/config.log $log_dir \
+        && \
+        cp -r $CONTAINER_WORKDIR/*/_build/sub/tests/testsuite.* \
+        $log_dir || true \
+        && \
+        cp -r $CONTAINER_WORKDIR/tests/system-*-testsuite.* \
+        $log_dir || true \
+        && \
+        chmod -R +r $log_dir \
+        &&
+        tar -czvf $CONTAINER_WORKSPACE/logs.tgz $log_dir
+    "
+    ${CONTAINER_CMD} cp "$CONTAINER_ID:/$CONTAINER_WORKSPACE/logs.tgz" logs.tgz
+}
+
 function remove_container() {
     res=$?
-    [ "$res" -ne 0 ] && echo "*** ERROR: $res ***"
+    if [  "$res" -ne 0  ]; then
+        archive_logs
+        echo "*** ERROR: $res ***"
+    fi
+
     ${CONTAINER_CMD} rm -f "$CONTAINER_ID"
 }
 
@@ -49,8 +78,14 @@ function copy_sources_to_workdir() {
         cp -a $CONTAINER_WORKSPACE/ovn/. $CONTAINER_WORKDIR \
         && \
         rm -rf $CONTAINER_WORKDIR/ovs \
-        &&
-        cp -a $CONTAINER_WORKSPACE/ovs/. $CONTAINER_WORKDIR/ovs
+        && \
+        cp -a $CONTAINER_WORKSPACE/ovs/. $CONTAINER_WORKDIR/ovs \
+        && \
+        rm -rf $CONTAINER_WORKDIR/dpdk-dir \
+        && \
+        cp -a $CONTAINER_WORKSPACE/dpdk-dir/. $CONTAINER_WORKDIR/dpdk-dir \
+        && \
+        git config --global --add safe.directory $CONTAINER_WORKDIR
     "
 }
 
@@ -65,13 +100,23 @@ function run_tests() {
         cd $CONTAINER_WORKDIR \
         && \
         ARCH=$ARCH CC=$CC LIBS=$LIBS OPTS=$OPTS TESTSUITE=$TESTSUITE \
-        TEST_RANGE=$TEST_RANGE SANITIZERS=$SANITIZERS \
-        ./.ci/linux-build.sh
+        TEST_RANGE=$TEST_RANGE SANITIZERS=$SANITIZERS DPDK=$DPDK \
+        RECHECK=$RECHECK UNSTABLE=$UNSTABLE ./.ci/linux-build.sh
     "
 }
 
+function check_clang_version_ge() {
+    lower=$1
+    version=$(clang --version | head -n1 | cut -d' ' -f3)
+    if ! echo -e "$lower\n$version" | sort -CV; then
+      return 1
+    fi
+
+    return 0
+}
+
 options=$(getopt --options "" \
-    --long help,shell,jobs:,ovn-path:,ovs-path:,image-name:\
+    --long help,shell,archive-logs,jobs:,ovn-path:,ovs-path:,image-name:\
     -- "${@}")
 eval set -- "$options"
 while true; do
@@ -95,10 +140,14 @@ while true; do
         shift
         IMAGE_NAME="$1"
         ;;
+    --archive-logs)
+        archive_logs="1"
+        ;;
     --help)
         set +x
-        printf "$0 [--shell] [--help] [--jobs=<JOBS>] [--ovn-path=<OVN_PATH>]"
-        printf "[--ovs-path=<OVS_PATH>] [--image-name=<IMAGE_NAME>]\n"
+        printf "$0 [--shell] [--help] [--archive-logs] [--jobs=<JOBS>] "
+        printf "[--ovn-path=<OVN_PATH>] [--ovs-path=<OVS_PATH>] "
+        printf "[--image-name=<IMAGE_NAME>]\n"
         exit
         ;;
     --)
@@ -110,8 +159,12 @@ while true; do
 done
 
 # Workaround for https://bugzilla.redhat.com/2153359
-if [ "$ARCH" = "aarch64" ]; then
+if [ "$ARCH" = "aarch64" ] && ! check_clang_version_ge "16.0.0"; then
     ASAN_OPTIONS="detect_leaks=0"
+fi
+
+if [ -z "$DPDK" ]; then
+   mkdir -p "$DPDK_PATH"
 fi
 
 CONTAINER_ID="$($CONTAINER_CMD run --privileged -d \
@@ -120,6 +173,7 @@ CONTAINER_ID="$($CONTAINER_CMD run --privileged -d \
     -v /lib/modules/$(uname -r):/lib/modules/$(uname -r):ro \
     -v $OVN_PATH:$CONTAINER_WORKSPACE/ovn:Z \
     -v $OVS_PATH:$CONTAINER_WORKSPACE/ovs:Z \
+    -v $DPDK_PATH:$CONTAINER_WORKSPACE/dpdk-dir:Z \
     $IMAGE_NAME)"
 trap remove_container EXIT
 

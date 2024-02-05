@@ -157,6 +157,29 @@
         </column>
       </group>
 
+       <column name="options" key="ignore_chassis_features">
+        <p>
+          When set to <code>false</code>, the <code>ovn-northd</code> will
+          evaluate the features supported by each chassis and will only
+          activate features that are universally supported by all chassis. This
+          approach is crucial for maintaining backward compatibility during an
+          upgrade when the <code>ovn-northd</code> is updated prior to the
+          <code>ovn-controller</code>. However, if any chassis is poorly
+          managed and the upgrade is unsuccessful, it will restrict
+          <code>ovn-northd</code> from activating the new features.
+        </p>
+        <p>
+          Alternatively, setting this option to <code>true</code> instructs
+          <code>ovn-northd</code> to bypass the support status of features on
+          each chassis and to directly implement the latest features. This
+          approach safeguards the operation of <code>ovn-northd</code> from
+          being adversely affected by a mismatched configuration of a chassis.
+        </p>
+        <p>
+          The default setting for this option is <code>false</code>.
+        </p>
+      </column>
+
       <column name="options" key="mac_prefix">
         Configure a given OUI to be used as prefix when L2 address is
         dynamically assigned, e.g. <code>00:11:22</code>
@@ -165,6 +188,14 @@
       <column name="options" key="mac_binding_removal_limit"
               type='{"type": "integer", "minInteger": 0, "maxInteger": 4294967295}'>
         MAC binding aging bulk removal limit. This limits how many rows
+        can expire in a single transaction. Default value is 0 which
+        is unlimited. When we hit the limit next batch removal is delayed by
+        5 s.
+      </column>
+
+      <column name="options" key="fdb_removal_limit"
+              type='{"type": "integer", "minInteger": 0, "maxInteger": 4294967295}'>
+        FDB aging bulk removal limit. This limits how many rows
         can expire in a single transaction. Default value is 0 which
         is unlimited. When we hit the limit next batch removal is delayed by
         5 s.
@@ -212,6 +243,24 @@
         <p>
           If the value is nonzero, then it will be forced to a value of
           at least 1000 ms.
+        </p>
+      </column>
+
+      <column name="options" key="nbctl_probe_interval">
+        <p>
+          The inactivity probe interval of the connection to the OVN Northbound
+          database from <code>ovn-nbctl</code> utility, in milliseconds.
+          If the value is zero, it disables the connection keepalive feature.
+        </p>
+
+        <p>
+          If the value is nonzero, then it will be forced to a value of
+          at least 1000 ms.
+        </p>
+
+        <p>
+          If the value is less than zero, then the default inactivity probe
+          interval for <code>ovn-nbctl</code> would be left intact (120000 ms).
         </p>
       </column>
 
@@ -312,6 +361,24 @@
           collector_set_id. The value must match that of the local OVS
           configuration as described in <code>ovs-actions</code>(7).
         </p>
+      </column>
+
+      <column name="options" key="use_common_zone" type='{"type": "boolean"}'>
+        Default value is <code>false</code>. If set to <code>true</code>
+        the SNAT and DNAT happens in common zone, instead of happening in
+        separate zones, depending on the configuration. However, this option
+        breaks traffic when there is configuration of DGP + LB + SNAT on
+        this LR. The value <code>true</code> should be used only in case
+        of HWOL compatibility with GDP.
+      </column>
+
+      <column name="options" key="northd-backoff-interval-ms">
+        Maximum interval that the northd incremental engine is delayed by
+        in milliseconds. Setting the value to nonzero delays the next northd
+        engine run by the previous run time, capped by the specified value.
+        If the value is zero the engine won't be delayed at all.
+        The recommended period is smaller than 500 ms, beyond that the latency
+        of SB changes would be very noticeable.
       </column>
 
       <group title="Options for configuring interconnection route advertisement">
@@ -479,6 +546,10 @@
     <column name="meters" key="reject">
       Rate limiting meter for packets that trigger a reject action
     </column>
+    <column name="meters" key="svc-monitor">
+      Rate limiting meter for packets that are arriving to service
+      monitor MAC address.
+    </column>
     <column name="external_ids">
       See <em>External IDs</em> at the beginning of this document.
     </column>
@@ -635,6 +706,13 @@
       <column name="other_config" key="mac_only" type='{"type": "boolean"}'>
         Value used to request to assign L2 address only if neither subnet
         nor ipv6_prefix are specified
+      </column>
+
+      <column name="other_config" key="fdb_age_threshold"
+              type='{"type": "integer", "minInteger": 0, "maxInteger": 4294967295}'>
+        FDB aging <code>threshold</code> value in seconds. FDB exceeding
+        this timeout will be automatically removed. The value defaults
+        to 0, which means disabled.
       </column>
     </group>
 
@@ -1029,6 +1107,14 @@
           should have a route to forward packets sent to configured proxy ARP
           MAC/IPs to an appropriate destination.
         </column>
+
+        <column name="options" key="enable_router_port_acl"
+                type='{"type": "boolean"}'>
+          Optional. Enable conntrack for the router port whose peer is
+          l3dgw_port if set to <code>true</code>. The default value is
+          <code>false</code>.
+        </column>
+
       </group>
 
       <group title="Options for localnet ports">
@@ -1046,7 +1132,7 @@
 
         <column name="options" key="ethtype">
           Optional. VLAN EtherType field value for encapsulating VLAN
-          headers. Supported values: 802.11q (default), 802.11ad.
+          headers. Supported values: 802.1q (default), 802.1ad.
         </column>
 
         <column name="options" key="localnet_learn_fdb"
@@ -1260,7 +1346,15 @@
       <column name="parent_name">
         The VM interface through which the nested container sends its network
         traffic.  This must match the <ref column="name"/> column for some
-        other <ref table="Logical_Switch_Port"/>.
+        other <ref table="Logical_Switch_Port"/>.  Note: for performance
+        of the OVN Southbound database conditional monitoring, unlike
+        for regular VIFs, <code>ovn-controller</code> will register
+        to get updates about all OVN Southbound database
+        <ref db="OVN_Southbound" table="Port_Binding"/> table records
+        that correspond to nested container ports even if
+        <code>external_ids:ovn-monitor-all</code> is set to
+        <code>false</code>.  See <code>ovn-controller</code>(8) for more
+        information.
       </column>
 
       <column name="tag_request">
@@ -2254,7 +2348,37 @@ or
           ICMPv4/ICMPv6 unreachable message for other IPv4/IPv6-based
           protocols.
         </li>
+
+        <li>
+          <code>pass</code>: Pass to the next ACL tier. If using multiple ACL
+          tiers, a match on this ACL will stop evaluating ACLs at the current
+          tier and move to the next one. If not using ACL tiers or if a
+          <code>pass</code> ACL is matched at the final tier, then the
+          <ref column="options" key="default_acl_drop" table="NB_Global" />
+          option from the <ref table="NB_Global" /> table is used to
+          determine how to proceed.
+        </li>
       </ul>
+    </column>
+
+    <column name="tier">
+      <p>The hierarchical tier that this ACL belongs to.</p>
+
+      <p>
+        ACLs can be assigned to numerical tiers. When evaluating ACLs, an
+        internal counter is used to determine which tier of ACLs should be
+        evaluated. Tier 0 ACLs are evaluated first. If no verdict can be
+        determined, then tier 1 ACLs are evaluated next. This continues
+        until the maximum tier value is reached. If all tiers of ACLs are
+        evaluated and no verdict is reached, then the <ref column="options"
+        key="default_acl_drop" table="NB_Global" /> option from table
+        <ref table="NB_Global" /> is used to determine how to proceed.
+      </p>
+
+      <p>
+        In this version of OVN, the maximum tier value for ACLs is 3,
+        meaning there are 4 tiers of ACLs allowed (0-3).
+      </p>
     </column>
 
     <group title="options">
@@ -2570,10 +2694,65 @@ or
       </column>
 
       <column name="options" key="mac_binding_age_threshold"
-              type='{"type": "integer", "minInteger": 0, "maxInteger": 4294967295}'>
-        MAC binding aging <code>threshold</code> value in seconds. MAC binding
-        exceeding this timeout will be automatically removed. The value
-        defaults to 0, which means disabled.
+              type='{"type": "string"}'>
+        <p>
+            Specifies the MAC binding aging thresholds based on CIDRs, with the
+            format: <var>entry</var>[<code>;</code><var>entry</var>[...]],
+            where each <var>entry</var> has the format:
+            [<var>cidr</var><code>:</code>]<var>threshold</var>
+        </p>
+
+        <ul>
+          <li>
+            <var>cidr</var>: Can be either an IPv4 or IPv6 CIDR.
+          </li>
+          <li>
+            <var>threshold</var>: Threshold value in seconds. MAC bindings with
+            IP addresses matching the specified CIDR that exceed this timeout
+            will be automatically removed.
+          </li>
+        </ul>
+
+        <p>
+            If an <var>entry</var> is provided without an CIDR (just the
+            threshold value), it specifies the default threshold for MAC
+            bindings that don't match any of the given CIDRs. If there are
+            multiple default threshold entries in the option, the behavior is
+            undefined.
+        </p>
+
+        <p>
+            If there are multiple CIDRs matching a MAC binding IP, the one with
+            the longest prefix length takes effect. If there are multiple
+            entries with the same CIDR in the option, the behavior is
+            undefined.
+        </p>
+
+        <p>
+            If no matching CIDR is found for a MAC binding IP, and no default
+            threshold is specified, the behavior defaults to the original: the
+            binding will not be removed based on age.
+        </p>
+
+        <p>
+            The value can also default to an empty string, which means that the
+            aging threshold is disabled. Any string not in the above format is
+            regarded as invalid and the aging is disabled.
+        </p>
+
+        <p>
+            Example:
+            <code>192.168.0.0/16:300;192.168.10.0/24:0;fe80::/10:600;1200</code>
+        </p>
+
+        <p>
+            This sets a threshold of 300 seconds for MAC bindings with IP
+            addresses in the 192.168.0.0/16 range, excluding the 192.168.1.0/24
+            range (for which the aging is disabled), a threshold of 600 seconds
+            for MAC bindings with IP addresses in the fe80::/10 IPv6 range, and
+            a default threshold of 1200 seconds for all other MAC bindings.
+        </p>
+
       </column>
     </group>
 
@@ -2629,11 +2808,21 @@ or
     </column>
 
     <column name="action">
-      <p>When specified, matching flows will have DSCP marking applied.</p>
+      <p>
+        When <code>dscp</code> action is specified, matching flows will have
+        have DSCP marking applied.
+        When <code>mark</code> action is specified, matching flows will have
+        packet marking applied.
+      </p>
+
       <ul>
         <li>
           <code>dscp</code>: The value of this action should be in the
           range of 0 to 63 (inclusive).
+        </li>
+        <li>
+           <code>mark</code>: The value of this action should be a positive
+           integer.
         </li>
       </ul>
     </column>
@@ -2678,20 +2867,26 @@ or
         The value of this field represents selection criteria of the mirror.
         <code>to-lport</code> mirrors the packets coming into logical port.
         <code>from-lport</code> mirrors the packets going out of logical port.
+        <code>both</code> mirrors for both directions.
       </p>
     </column>
 
     <column name="sink">
       <p>
         The value of this field represents the destination/sink of the mirror.
-        The value it takes is an IP address of the sink port.
+        If the <var>type</var> is <code>gre</code> or <code>erspan</code>,
+        the value indicates the tunnel remote IP (either IPv4 or IPv6).
+        For a <var>type</var> of <code>local</code>, this field defines a
+        local interface on the OVS integration bridge to be used as the
+        mirror destination. The interface must possess external-ids:mirror-id
+        that matches this string.
       </p>
     </column>
 
     <column name="type">
       <p>
-        The value of this field represents the type of the tunnel used for
-        sending the mirrored packets.
+        The value of this field specifies the mirror type - <code>gre</code>,
+        <code>erspan</code> or <code>local</code>.
       </p>
     </column>
 
@@ -2701,6 +2896,7 @@ or
         tunnel type is <code>gre</code>, this field represents the
         <code>GRE</code> key value and if the configured tunnel type is
         <code>erspan</code> it represents the <code>erspan_idx</code> value.
+        It is ignored if the type is <code>local</code>.
       </p>
     </column>
 
@@ -3259,6 +3455,25 @@ or
         </p>
       </column>
     </group>
+
+    <group title="Status">
+      <p>
+        Additional status about the logical router port.
+      </p>
+      <column name="status" key="hosting-chassis">
+        <p>
+          This option is populated by <code>ovn-northd</code>.
+        </p>
+
+        <p>
+          When a distributed gateway port is bound to a location in
+          the OVN Southbound database
+          <ref db="OVN_Southbound" table="Port_Binding"/>
+          <code>ovn-northd</code> will populate this key with the
+          name of the Chassis that is currently hosting this port.
+        </p>
+      </column>
+    </group>
   </table>
 
   <table name="Logical_Router_Static_Route" title="Logical router static routes">
@@ -3474,6 +3689,13 @@ or
 
       <p>
         One IP from the list is selected as next hop.
+      </p>
+    </column>
+
+    <column name="bfd_sessions">
+      <p>
+        Reference to <ref table="BFD"/> row if the route policy has associated
+        some BFD sessions.
       </p>
     </column>
 
@@ -4127,6 +4349,13 @@ or
             way. Default value for this option is false.
           </p>
         </column>
+
+        <column name="options" key="fqdn">
+          <p>
+            The DHCPv6 option code for this option is 39.
+            If set, indicates the DHCPv6 option "FQDN".
+          </p>
+        </column>
       </group>
     </group>
 
@@ -4391,6 +4620,22 @@ or
 
       <p><b>Example: </b> "vm1.ovn.org" = "10.0.0.4 aef0::4"</p>
       <p><b>Example: </b> "4.0.0.10.in-addr.arpa" = "vm1.ovn.org"</p>
+    </column>
+
+    <column name="options" key="ovn-owned">
+      If set to true, then the OVN will be the main responsible for
+      <code>DNS Records</code> within this row.
+
+      <p>
+        A <code>DNS</code> row with this option set to <code>true</code>
+        can be created for domains that the user needs to configure
+        locally and don't care about IPv6 only interested in IPv4 or
+        vice versa.
+
+        This will let ovn send IPv4 DNS reply and reject/ignore IPv6
+        queries to save the waiting for a timeout on those uninteresting
+        queries.
+      </p>
     </column>
 
     <column name="external_ids">

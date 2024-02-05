@@ -47,11 +47,11 @@ m4_define([OVN_CLEANUP],[
     OVS_APP_EXIT_AND_WAIT([ovsdb-server])
 
     as northd
-    OVS_APP_EXIT_AND_WAIT([[$NORTHD_TYPE]])
+    OVS_APP_EXIT_AND_WAIT([ovn-northd])
 
     if test -d northd-backup; then
         as northd-backup
-        OVS_APP_EXIT_AND_WAIT([[$NORTHD_TYPE]])
+        OVS_APP_EXIT_AND_WAIT([ovn-northd])
     fi
 
     OVN_CLEANUP_VSWITCH([main])
@@ -71,11 +71,11 @@ m4_define([OVN_CLEANUP_AZ],[
     OVS_APP_EXIT_AND_WAIT([ovsdb-server])
 
     as $1/northd
-    OVS_APP_EXIT_AND_WAIT([[$NORTHD_TYPE]])
+    OVS_APP_EXIT_AND_WAIT([ovn-northd])
 
     if test -d $1/northd-backup; then
         as $1/northd-backup
-        OVS_APP_EXIT_AND_WAIT([[$NORTHD_TYPE]])
+        OVS_APP_EXIT_AND_WAIT([ovn-northd])
     fi
 
     as $1/ic
@@ -165,11 +165,6 @@ ovn_start_northd() {
         backup) suffix=-backup ;;
     esac
 
-    case ${NORTHD_TYPE:=ovn-northd} in
-        ovn-northd) ;;
-        ovn-northd-ddlog) northd_args="$northd_args --ddlog-record=${AZ:+$AZ/}northd$suffix/replay.dat -v" ;;
-    esac
-
     if test X$NORTHD_USE_PARALLELIZATION = Xyes; then
         northd_args="$northd_args --n-threads=4"
     fi
@@ -177,7 +172,7 @@ ovn_start_northd() {
     local name=${d_prefix}northd${suffix}
     echo "${prefix}starting $name"
     test -d "$ovs_base/$name" || mkdir "$ovs_base/$name"
-    as $name start_daemon $NORTHD_TYPE $northd_args -vjsonrpc \
+    as $name start_daemon ovn-northd $northd_args -vjsonrpc \
                --ovnnb-db=$OVN_NB_DB --ovnsb-db=$OVN_SB_DB
 }
 
@@ -188,16 +183,16 @@ ovn_start_northd() {
 # ovn-sbctl and ovn-nbctl use them by default, and starts ovn-northd running
 # against them.
 #
-# Normally this starts an active northd and a backup northd.  The following
+# Normally this starts only an active northd and no backup northd.  The following
 # options are accepted to adjust that:
-#   --backup-northd=none    Don't start a backup northd.
+#   --backup-northd         Start a backup northd.
 #   --backup-northd=paused  Start the backup northd in the paused state.
 ovn_start () {
-    local backup_northd=:
+    local backup_northd=false
     local backup_northd_options=
     case $1 in
-        --backup-northd=none) backup_northd=false; shift ;;
-        --backup-northd=paused) backup_northd_options=--paused; shift ;;
+        --backup-northd) backup_northd=true; shift ;;
+        --backup-northd=paused) backup_northd=true; backup_northd_options=--paused; shift ;;
     esac
     local AZ=$1
     local msg_prefix=${AZ:+$AZ: }
@@ -219,10 +214,7 @@ ovn_start () {
     fi
 
     if test X$HAVE_OPENSSL = Xyes; then
-        # Create the SB DB pssl+RBAC connection. Ideally we could pre-create
-        # SB_Global and Connection with ovsdb-tool transact at DB creation
-        # time, but unfortunately that does not work, northd-ddlog will replace
-        # the SB_Global record on startup.
+        # Create the SB DB pssl+RBAC connection.
         ovn-sbctl \
             -- --id=@c create connection \
                 target=\"pssl:0:127.0.0.1\" role=ovn-controller \
@@ -288,10 +280,43 @@ net_attach () {
         || return 1
 }
 
+ovn_wait_for_encaps() {
+    local systemid=$1
+
+    if [[ -f "${OVN_SYSCONFDIR}/system-id-override" ]]; then
+        systemid=$(cat ${OVN_SYSCONFDIR}/system-id-override)
+    fi
+
+    local encap=$(ovs-vsctl get Open_vSwitch . external_ids:ovn-encap-type-$systemid)
+    if [[ -z "$encap" ]]; then
+        encap=$(ovs-vsctl get Open_vSwitch . external_ids:ovn-encap-type)
+    fi
+    encap=$(tr -d '"' <<< $encap)
+
+    local ip=$(ovs-vsctl get Open_vSwitch . external_ids:ovn-encap-ip-$systemid)
+    if [[ -z "$ip" ]]; then
+        ip=$(ovs-vsctl get Open_vSwitch . external_ids:ovn-encap-ip)
+    fi
+    ip=$(tr -d '"' <<< $ip)
+
+    IFS="," read -r -a encap_types <<< "$encap"
+    for e in "${encap_types[[@]]}"; do
+        wait_column "$ip" sb:Encap ip chassis_name="$systemid" type="$e"
+    done
+}
+
 # ovn_az_attach AZ NETWORK BRIDGE IP [MASKLEN] [ENCAP]
 ovn_az_attach() {
-    local az=$1 net=$2 bridge=$3 ip=$4 masklen=${5-24} encap=${6-geneve,vxlan} systemid=${7-$sandbox} cli_args=${@:8}
+    local az=$1 net=$2 bridge=$3 ip=$4 masklen=${5-24} encap=${6-geneve,vxlan}
+    local systemid=${7-$sandbox} systemid_override=$8
     net_attach $net $bridge || return 1
+
+    local expected_encap_id=$systemid
+    local cli_args=""
+    if [[ -n "$systemid_override" ]]; then
+        cli_args="-n $systemid_override"
+        expected_encap_id=$systemid_override
+    fi
 
     mac=`ovs-vsctl get Interface $bridge mac_in_use | sed s/\"//g`
     arp_table="$arp_table $sandbox,$bridge,$ip,$mac"
@@ -332,6 +357,11 @@ ovn_az_attach() {
     fi
 
     start_daemon ovn-controller --enable-dummy-vif-plug ${cli_args} || return 1
+    if test X"$az" = XNONE; then
+        ovn_wait_for_encaps $expected_encap_id
+    else
+        ovn_as $az ovn_wait_for_encaps $expected_encap_id
+    fi
 }
 
 # ovn_attach NETWORK BRIDGE IP [MASKLEN] [ENCAP]
@@ -371,8 +401,8 @@ start_virtual_controller() {
         -- set bridge $int_bridge fail-mode=secure other-config:disable-in-band=true \
         || return 1
 
-    echo IHAR ${cli_args}
     ovn-controller --enable-dummy-vif-plug ${cli_args} -vconsole:off --detach --no-chdir
+    ovn_wait_for_encaps $systemid
 }
 
 # ovn_setenv AZ
@@ -817,26 +847,127 @@ ovn_trace_client() {
     ovs-appctl -t $target trace "$@" | tee trace | sed '/^# /d'
 }
 
+# Receives a string with scapy python code that represents a packet.
+# Returns a hex-string that contains bytes that reflect the packet symbolic
+# description.
+#
+# Scapy docs: https://scapy.readthedocs.io/en/latest/usage.html
+#
+# Example of usage:
+#
+# packet=$(fmt_pkt "
+#     Ether(dst='ff:ff:ff:ff:ff:ff', src='50:64:00:00:00:01') /
+#     IPv6(src='abed::1', dst='ff02::1:ff00:2') /
+#     ICMPv6ND_NS(tgt='abed::2')
+# ")
+#
+# ovs-appctl netdev-dummy/receive $vif $packet
+#
+fmt_pkt() {
+    ctlfile=$ovs_base/scapy.ctl
+    if [[ ! -S $ctlfile ]]; then
+        start_scapy_server
+    fi
+    while [[ ! -S $ctlfile ]]; do sleep 0.1; done
+    ovs-appctl -t $ctlfile payload "$1"
+}
+
+start_scapy_server() {
+    pidfile=$ovs_base/scapy.pid
+    ctlfile=$ovs_base/scapy.ctl
+    logfile=$ovs_base/scapy.log
+    lockfile=$ovs_base/scapy.lock
+
+    flock -n $lockfile "$top_srcdir"/tests/scapy-server.py \
+        --pidfile=$pidfile --unixctl=$ctlfile --log-file=$logfile --detach \
+    && on_exit "test -e \"$pidfile\" && ovs-appctl -t $ctlfile exit"
+}
+
+sleep_northd() {
+  echo Northd going to sleep
+  AT_CHECK([kill -STOP $(cat northd/ovn-northd.pid)])
+  on_exit "kill -CONT $(cat northd/ovn-northd.pid)"
+}
+
+wake_up_northd() {
+  echo Northd waking up
+  AT_CHECK([kill -CONT $(cat northd/ovn-northd.pid)])
+}
+
+sleep_sb() {
+  echo SB going to sleep
+  AT_CHECK([kill -STOP $(cat ovn-sb/ovsdb-server.pid)])
+  on_exit "kill -CONT $(cat ovn-sb/ovsdb-server.pid)"
+}
+wake_up_sb() {
+  echo SB waking up
+  AT_CHECK([kill -CONT $(cat ovn-sb/ovsdb-server.pid)])
+}
+sleep_controller() {
+  hv=$1
+  echo Controller $hv going to sleep
+  as $hv
+  check ovn-appctl debug/pause
+  OVS_WAIT_UNTIL([test x$(ovn-appctl -t ovn-controller debug/status) = "xpaused"])
+}
+wake_up_controller() {
+  hv=$1
+  as $hv
+  echo Controller $hv waking up
+  ovn-appctl debug/resume
+  OVS_WAIT_UNTIL([test x$(ovn-appctl -t ovn-controller debug/status) = "xrunning"])
+}
+sleep_ovs() {
+  hv=$1
+  echo ovs $hv going to sleep
+  AT_CHECK([kill -STOP $(cat $hv/ovs-vswitchd.pid)])
+  on_exit "kill -CONT $(cat $hv/ovs-vswitchd.pid)"
+}
+
+wake_up_ovs() {
+  hv=$1
+  echo ovs $hv going to wake-up
+  AT_CHECK([kill -CONT $(cat $hv/ovs-vswitchd.pid)])
+}
+
+sleep_ovsdb() {
+  echo OVSDB $1 going to sleep
+  AT_CHECK([kill -STOP $(cat $1/ovsdb-server.pid)])
+  on_exit "kill -CONT $(cat $1/ovsdb-server.pid)"
+}
+wake_up_ovsdb() {
+  echo OVSDB $1 waking up
+  AT_CHECK([kill -CONT $(cat $1/ovsdb-server.pid)])
+}
+
+trim_zeros() {
+    sed 's/\(00\)\{1,\}$//'
+}
+
 OVS_END_SHELL_HELPERS
 
 m4_define([OVN_POPULATE_ARP], [AT_CHECK(ovn_populate_arp__, [0], [ignore])])
 
 # Defines versions of the test with all combinations of northd,
-# parallelization on/off and conditional monitoring on/off.
+# parallelization enabled and conditional monitoring on/off.
 m4_define([OVN_FOR_EACH_NORTHD],
-  [m4_foreach([NORTHD_TYPE], [ovn-northd],
-     [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes, no],
-       [m4_foreach([OVN_MONITOR_ALL], [yes, no], [$1
-])])])])
-
-# Defines versions of the test with all combinations of northd and
-# parallelization on/off.  To be used when the ovn-controller configuration
-# is not relevant.
-m4_define([OVN_FOR_EACH_NORTHD_NO_HV],
-  [m4_foreach([NORTHD_TYPE], [ovn-northd],
-     [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes, no], [$1
+  [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes],
+     [m4_foreach([OVN_MONITOR_ALL], [yes, no], [$1
 ])])])
 
+# Defines versions of the test with all combinations of northd and
+# parallelization enabled. To be used when the ovn-controller configuration
+# is not relevant.
+m4_define([OVN_FOR_EACH_NORTHD_NO_HV],
+  [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes], [$1
+])])
+
+# Defines versions of the test with all combinations of northd and
+# parallelization on/off. To be used when the ovn-controller configuration
+# is not relevant and we want to test parallelization permutations.
+m4_define([OVN_FOR_EACH_NORTHD_NO_HV_PARALLELIZATION],
+  [m4_foreach([NORTHD_USE_PARALLELIZATION], [yes, no], [$1
+])])
 
 # OVN_NBCTL(NBCTL_COMMAND) adds NBCTL_COMMAND to list of commands to be run by RUN_OVN_NBCTL().
 m4_define([OVN_NBCTL], [
@@ -847,4 +978,9 @@ m4_define([OVN_NBCTL], [
 m4_define([RUN_OVN_NBCTL], [
     check ovn-nbctl ${command}
     unset command
+])
+
+m4_define([TAG_UNSTABLE], [
+    AT_KEYWORDS([unstable])
+    AT_SKIP_IF([test X"$SKIP_UNSTABLE" = Xyes])
 ])

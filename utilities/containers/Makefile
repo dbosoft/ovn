@@ -1,7 +1,11 @@
 CONTAINER_CMD ?= podman
-DISTRO ?= fedora
 IMAGE_NAME ?= "ovn-org/ovn-tests"
+CONTAINERS_PATH ?= "."
 
-.PHONY: build
+distros := fedora ubuntu
 
-build: ;$(CONTAINER_CMD) build --no-cache --rm -t $(IMAGE_NAME) -f $(DISTRO)/Dockerfile .
+.PHONY: $(distros)
+
+$(distros):
+	$(CONTAINER_CMD) build --no-cache --rm -t $(IMAGE_NAME):$@ \
+	-f $@/Dockerfile . --build-arg=CONTAINERS_PATH=$(CONTAINERS_PATH)

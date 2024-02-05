@@ -205,6 +205,9 @@ ovn_dbctl_main(int argc, char *argv[],
     ovsdb_idl_set_remote(idl, db, daemon_mode);
     ovsdb_idl_set_leader_only(idl, leader_only);
 
+    /* Set reasonable high probe interval. */
+    set_idl_probe_interval(idl, db, DEFAULT_UTILS_PROBE_INTERVAL_MSEC);
+
     if (daemon_mode) {
         server_loop(dbctl_options, idl, argc, argv_);
     } else {
@@ -605,6 +608,14 @@ apply_options_direct(const struct ovn_dbctl_options *dbctl_options,
 
         case 'C':
             ssl_ca_cert_file = optarg;
+            break;
+
+        case OPT_SSL_PROTOCOLS:
+            stream_ssl_set_protocols(optarg);
+            break;
+
+        case OPT_SSL_CIPHERS:
+            stream_ssl_set_ciphers(optarg);
             break;
 
         case OPT_BOOTSTRAP_CA_CERT:
@@ -1095,6 +1106,13 @@ out:
 }
 
 static void
+update_inactivity_probe(struct server_cmd_run_ctx *ctx)
+{
+    set_idl_probe_interval(ctx->idl, db,
+                           ctx->dbctl_options->get_inactivity_probe(ctx->idl));
+}
+
+static void
 server_loop(const struct ovn_dbctl_options *dbctl_options,
             struct ovsdb_idl *idl, int argc, char *argv[])
 {
@@ -1102,7 +1120,7 @@ server_loop(const struct ovn_dbctl_options *dbctl_options,
     bool exiting = false;
 
     service_start(&argc, &argv);
-    daemonize_start(false);
+    daemonize_start(false, false);
 
     char *abs_unixctl_path = get_abs_unix_ctl_path(unixctl_path);
     int error = unixctl_server_create(abs_unixctl_path, &server);
@@ -1125,6 +1143,10 @@ server_loop(const struct ovn_dbctl_options *dbctl_options,
 
     for (;;) {
         update_ssl_config();
+
+        /* Configure inactivity probe from connected DB. */
+        update_inactivity_probe(&server_cmd_run_ctx);
+
         memory_run();
         if (memory_should_report()) {
             struct simap usage = SIMAP_INITIALIZER(&usage);

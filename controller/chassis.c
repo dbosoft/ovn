@@ -61,7 +61,7 @@ struct ovs_chassis_cfg {
 
     /* Set of encap types parsed from the 'ovn-encap-type' external-id. */
     struct sset encap_type_set;
-    /* Set of encap IPs parsed from the 'ovn-encap-type' external-id. */
+    /* Set of encap IPs parsed from the 'ovn-encap-ip' external-id. */
     struct sset encap_ip_set;
     /* Interface type list formatted in the OVN-SB Chassis required format. */
     struct ds iface_types;
@@ -368,6 +368,8 @@ chassis_build_other_config(const struct ovs_chassis_cfg *ovs_cfg,
     smap_replace(config, OVN_FEATURE_CT_NO_MASKED_LABEL, "true");
     smap_replace(config, OVN_FEATURE_MAC_BINDING_TIMESTAMP, "true");
     smap_replace(config, OVN_FEATURE_CT_LB_RELATED, "true");
+    smap_replace(config, OVN_FEATURE_FDB_TIMESTAMP, "true");
+    smap_replace(config, OVN_FEATURE_LS_DPG_COLUMN, "true");
 }
 
 /*
@@ -491,6 +493,18 @@ chassis_other_config_changed(const struct ovs_chassis_cfg *ovs_cfg,
 
     if (!smap_get_bool(&chassis_rec->other_config,
                        OVN_FEATURE_CT_LB_RELATED,
+                       false)) {
+        return true;
+    }
+
+    if (!smap_get_bool(&chassis_rec->other_config,
+                       OVN_FEATURE_FDB_TIMESTAMP,
+                       false)) {
+        return true;
+    }
+
+    if (!smap_get_bool(&chassis_rec->other_config,
+                       OVN_FEATURE_LS_DPG_COLUMN,
                        false)) {
         return true;
     }
@@ -624,6 +638,8 @@ update_supported_sset(struct sset *supported)
     sset_add(supported, OVN_FEATURE_CT_NO_MASKED_LABEL);
     sset_add(supported, OVN_FEATURE_MAC_BINDING_TIMESTAMP);
     sset_add(supported, OVN_FEATURE_CT_LB_RELATED);
+    sset_add(supported, OVN_FEATURE_FDB_TIMESTAMP);
+    sset_add(supported, OVN_FEATURE_LS_DPG_COLUMN);
 }
 
 static void
@@ -823,7 +839,7 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     }
 
     ovs_chassis_cfg_destroy(&ovs_cfg);
-    return chassis_rec;
+    return existed ? chassis_rec : NULL;
 }
 
 bool

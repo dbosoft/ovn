@@ -18,6 +18,7 @@
 #include "lflow.h"
 #include "coverage.h"
 #include "ha-chassis.h"
+#include "lb.h"
 #include "lflow-cache.h"
 #include "local_data.h"
 #include "lport.h"
@@ -164,7 +165,7 @@ tunnel_ofport_cb(const void *aux_, const char *port_name, ofp_port_t *ofport)
     }
 
     if (!get_chassis_tunnel_ofport(aux->chassis_tunnels, pb->chassis->name,
-                                   NULL, ofport)) {
+                                   ofport)) {
         return false;
     }
 
@@ -397,7 +398,7 @@ consider_lflow_for_added_as_ips__(
                             : OFTABLE_LOG_EGRESS_PIPELINE);
     uint8_t ptable = first_ptable + lflow->table_id;
     uint8_t output_ptable = (ingress
-                             ? OFTABLE_REMOTE_OUTPUT
+                             ? OFTABLE_OUTPUT_INIT
                              : OFTABLE_SAVE_INPORT);
 
     uint64_t ovnacts_stub[1024 / 8];
@@ -887,6 +888,7 @@ add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
         .fdb_lookup_ptable = OFTABLE_LOOKUP_FDB,
         .in_port_sec_ptable = OFTABLE_CHK_IN_PORT_SEC,
         .out_port_sec_ptable = OFTABLE_CHK_OUT_PORT_SEC,
+        .mac_cache_use_table = OFTABLE_MAC_CACHE_USE,
         .ctrl_meter_id = ctrl_meter_id,
         .common_nat_ct_zone = get_common_nat_zone(ldp),
     };
@@ -1016,6 +1018,7 @@ convert_match_to_expr(const struct sbrec_logical_flow *lflow,
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
         VLOG_WARN_RL(&rl, "error parsing match \"%s\": %s",
                     lflow->match, error);
+        expr_destroy(e);
         free(error);
         return NULL;
     }
@@ -1067,7 +1070,7 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
                             : OFTABLE_LOG_EGRESS_PIPELINE);
     uint8_t ptable = first_ptable + lflow->table_id;
     uint8_t output_ptable = (ingress
-                             ? OFTABLE_REMOTE_OUTPUT
+                             ? OFTABLE_OUTPUT_INIT
                              : OFTABLE_SAVE_INPORT);
 
     /* Parse OVN logical actions.
@@ -1337,6 +1340,7 @@ consider_neighbor_flow(struct ovsdb_idl_index *sbrec_port_binding_by_name,
 
     struct match get_arp_match = MATCH_CATCHALL_INITIALIZER;
     struct match lookup_arp_match = MATCH_CATCHALL_INITIALIZER;
+    struct match mb_cache_use_match = MATCH_CATCHALL_INITIALIZER;
 
     if (strchr(ip, '.')) {
         ovs_be32 ip_addr;
@@ -1345,9 +1349,14 @@ consider_neighbor_flow(struct ovsdb_idl_index *sbrec_port_binding_by_name,
             VLOG_WARN_RL(&rl, "bad 'ip' %s", ip);
             return;
         }
+
         match_set_reg(&get_arp_match, 0, ntohl(ip_addr));
+
         match_set_reg(&lookup_arp_match, 0, ntohl(ip_addr));
         match_set_dl_type(&lookup_arp_match, htons(ETH_TYPE_ARP));
+
+        match_set_dl_type(&mb_cache_use_match, htons(ETH_TYPE_IP));
+        match_set_nw_src(&mb_cache_use_match, ip_addr);
     } else {
         struct in6_addr ip6;
         if (!ipv6_parse(ip, &ip6)) {
@@ -1363,6 +1372,9 @@ consider_neighbor_flow(struct ovsdb_idl_index *sbrec_port_binding_by_name,
         match_set_dl_type(&lookup_arp_match, htons(ETH_TYPE_IPV6));
         match_set_nw_proto(&lookup_arp_match, 58);
         match_set_icmp_code(&lookup_arp_match, 0);
+
+        match_set_dl_type(&mb_cache_use_match, htons(ETH_TYPE_IPV6));
+        match_set_ipv6_src(&mb_cache_use_match, &ip6);
     }
 
     match_set_metadata(&get_arp_match, htonll(pb->datapath->tunnel_key));
@@ -1371,6 +1383,11 @@ consider_neighbor_flow(struct ovsdb_idl_index *sbrec_port_binding_by_name,
     match_set_metadata(&lookup_arp_match, htonll(pb->datapath->tunnel_key));
     match_set_reg(&lookup_arp_match, MFF_LOG_INPORT - MFF_REG0,
                   pb->tunnel_key);
+
+    match_set_dl_src(&mb_cache_use_match, mac_addr);
+    match_set_reg(&mb_cache_use_match, MFF_LOG_INPORT - MFF_REG0,
+                  pb->tunnel_key);
+    match_set_metadata(&mb_cache_use_match, htonll(pb->datapath->tunnel_key));
 
     uint64_t stub[1024 / 8];
     struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(stub);
@@ -1391,6 +1408,13 @@ consider_neighbor_flow(struct ovsdb_idl_index *sbrec_port_binding_by_name,
                     b ? b->header_.uuid.parts[0] : smb->header_.uuid.parts[0],
                     &lookup_arp_match, &ofpacts,
                     b ? &b->header_.uuid : &smb->header_.uuid);
+
+    if (b) {
+        ofpbuf_clear(&ofpacts);
+        ofctrl_add_flow(flow_table, OFTABLE_MAC_CACHE_USE, priority,
+                        b->header_.uuid.parts[0], &mb_cache_use_match,
+                        &ofpacts, &b->header_.uuid);
+    }
 
     ofpbuf_uninit(&ofpacts);
 }
@@ -1870,11 +1894,21 @@ add_lb_ct_snat_hairpin_vip_flow(const struct ovn_controller_lb *lb,
                                           local_datapaths, &match,
                                           &ofpacts, flow_table);
         }
+        /* datapath_group column is deprecated. */
         if (lb->slb->datapath_group) {
             for (size_t i = 0; i < lb->slb->datapath_group->n_datapaths; i++) {
                 add_lb_ct_snat_hairpin_for_dp(
                     lb, !!lb_vip->vip_port,
                     lb->slb->datapath_group->datapaths[i],
+                    local_datapaths, &match, &ofpacts, flow_table);
+            }
+        }
+        if (lb->slb->ls_datapath_group) {
+            for (size_t i = 0;
+                 i < lb->slb->ls_datapath_group->n_datapaths; i++) {
+                add_lb_ct_snat_hairpin_for_dp(
+                    lb, !!lb_vip->vip_port,
+                    lb->slb->ls_datapath_group->datapaths[i],
                     local_datapaths, &match, &ofpacts, flow_table);
             }
         }
@@ -2033,11 +2067,17 @@ lflow_handle_changed_static_mac_bindings(
 static void
 consider_fdb_flows(const struct sbrec_fdb *fdb,
                    const struct hmap *local_datapaths,
-                   struct ovn_desired_flow_table *flow_table)
+                   struct ovn_desired_flow_table *flow_table,
+                   struct ovsdb_idl_index *sbrec_port_binding_by_key,
+                   bool localnet_learn_fdb)
 {
-    if (!get_local_datapath(local_datapaths, fdb->dp_key)) {
+    struct local_datapath *ld = get_local_datapath(local_datapaths,
+                                                   fdb->dp_key);
+    if (!ld) {
         return;
     }
+    const struct sbrec_port_binding *pb = lport_lookup_by_key_with_dp(
+        sbrec_port_binding_by_key, ld->datapath, fdb->port_key);
 
     struct eth_addr mac;
     if (!eth_addr_from_string(fdb->mac, &mac)) {
@@ -2059,6 +2099,7 @@ consider_fdb_flows(const struct sbrec_fdb *fdb,
     ofpbuf_clear(&ofpacts);
 
     uint8_t value = 1;
+    uint8_t is_vif =  pb ? !strcmp(pb->type, "") : 0;
     put_load(&value, sizeof value, MFF_LOG_FLAGS,
              MLF_LOOKUP_FDB_BIT, 1, &ofpacts);
 
@@ -2069,6 +2110,18 @@ consider_fdb_flows(const struct sbrec_fdb *fdb,
     ofctrl_add_flow(flow_table, OFTABLE_LOOKUP_FDB, 100,
                     fdb->header_.uuid.parts[0], &lookup_match, &ofpacts,
                     &fdb->header_.uuid);
+
+    if (is_vif && localnet_learn_fdb) {
+        struct match lookup_match_vif = MATCH_CATCHALL_INITIALIZER;
+        match_set_metadata(&lookup_match_vif, htonll(fdb->dp_key));
+        match_set_dl_src(&lookup_match_vif, mac);
+        match_set_reg_masked(&lookup_match_vif, MFF_LOG_FLAGS - MFF_REG0,
+                             MLF_LOCALNET, MLF_LOCALNET);
+
+        ofctrl_add_flow(flow_table, OFTABLE_LOOKUP_FDB, 100,
+                        fdb->header_.uuid.parts[0], &lookup_match_vif,
+                        &ofpacts, &fdb->header_.uuid);
+    }
     ofpbuf_uninit(&ofpacts);
 }
 
@@ -2077,11 +2130,14 @@ consider_fdb_flows(const struct sbrec_fdb *fdb,
 static void
 add_fdb_flows(const struct sbrec_fdb_table *fdb_table,
               const struct hmap *local_datapaths,
-              struct ovn_desired_flow_table *flow_table)
+              struct ovn_desired_flow_table *flow_table,
+              struct ovsdb_idl_index *sbrec_port_binding_by_key,
+              bool localnet_learn_fdb)
 {
     const struct sbrec_fdb *fdb;
     SBREC_FDB_TABLE_FOR_EACH (fdb, fdb_table) {
-        consider_fdb_flows(fdb, local_datapaths, flow_table);
+        consider_fdb_flows(fdb, local_datapaths, flow_table,
+                           sbrec_port_binding_by_key, localnet_learn_fdb);
     }
 }
 
@@ -2104,7 +2160,9 @@ lflow_run(struct lflow_ctx_in *l_ctx_in, struct lflow_ctx_out *l_ctx_out)
                          l_ctx_in->lb_hairpin_use_ct_mark,
                          l_ctx_out->flow_table);
     add_fdb_flows(l_ctx_in->fdb_table, l_ctx_in->local_datapaths,
-                  l_ctx_out->flow_table);
+                  l_ctx_out->flow_table,
+                  l_ctx_in->sbrec_port_binding_by_key,
+                  l_ctx_in->localnet_learn_fdb);
     add_port_sec_flows(l_ctx_in->binding_lports, l_ctx_in->chassis,
                        l_ctx_out->flow_table);
 }
@@ -2194,7 +2252,9 @@ lflow_add_flows_for_datapath(const struct sbrec_datapath_binding *dp,
     SBREC_FDB_FOR_EACH_EQUAL (fdb_row, fdb_index_row,
                               l_ctx_in->sbrec_fdb_by_dp_key) {
         consider_fdb_flows(fdb_row, l_ctx_in->local_datapaths,
-                           l_ctx_out->flow_table);
+                           l_ctx_out->flow_table,
+                           l_ctx_in->sbrec_port_binding_by_key,
+                           l_ctx_in->localnet_learn_fdb);
     }
     sbrec_fdb_index_destroy_row(fdb_index_row);
 
@@ -2257,6 +2317,15 @@ lflow_handle_flows_for_lport(const struct sbrec_port_binding *pb,
     if (pb->n_port_security && shash_find(l_ctx_in->binding_lports,
                                           pb->logical_port)) {
         consider_port_sec_flows(pb, l_ctx_out->flow_table);
+    }
+    if (l_ctx_in->localnet_learn_fdb_changed && l_ctx_in->localnet_learn_fdb) {
+        const struct sbrec_fdb *fdb;
+        SBREC_FDB_TABLE_FOR_EACH (fdb, l_ctx_in->fdb_table) {
+            consider_fdb_flows(fdb, l_ctx_in->local_datapaths,
+                               l_ctx_out->flow_table,
+                               l_ctx_in->sbrec_port_binding_by_key,
+                               l_ctx_in->localnet_learn_fdb);
+        }
     }
     return true;
 }
@@ -2387,7 +2456,9 @@ lflow_handle_changed_fdbs(struct lflow_ctx_in *l_ctx_in,
         VLOG_DBG("Add fdb flows for fdb "UUID_FMT,
                  UUID_ARGS(&fdb->header_.uuid));
         consider_fdb_flows(fdb, l_ctx_in->local_datapaths,
-                           l_ctx_out->flow_table);
+                           l_ctx_out->flow_table,
+                           l_ctx_in->sbrec_port_binding_by_key,
+                           l_ctx_in->localnet_learn_fdb);
     }
 
     return true;
@@ -2513,10 +2584,10 @@ build_in_port_sec_default_flows(const struct sbrec_port_binding *pb,
      *       investigation.
      *
      * Eg.  If there are below OF rules in the same table
-     * (1) priority=90,icmp6,reg14=0x1,metadata=0x1,nw_ttl=225,icmp_type=135,
+     * (1) priority=90,icmp6,reg14=0x1,metadata=0x1,nw_ttl=255,icmp_type=135,
      *     icmp_code=0,nd_sll=fa:16:3e:94:05:98
      *     actions=load:0->NXM_NX_REG10[12]
-     * (2) priority=80,icmp6,reg14=0x1,metadata=0x1,nw_ttl=225,icmp_type=135,
+     * (2) priority=80,icmp6,reg14=0x1,metadata=0x1,nw_ttl=255,icmp_type=135,
      *     icmp_code=0 actions=load:1->NXM_NX_REG10[12]
      *
      * An IPv6 NS packet with nd_sll = fa:16:3e:94:05:98 is matching on the
@@ -2801,7 +2872,7 @@ build_in_port_sec_nd_flows(const struct sbrec_port_binding *pb,
     reset_match_for_port_sec_flows(pb, MFF_LOG_INPORT, m);
     match_set_dl_type(m, htons(ETH_TYPE_IPV6));
     match_set_nw_proto(m, IPPROTO_ICMPV6);
-    match_set_nw_ttl(m, 225);
+    match_set_nw_ttl(m, 255);
     match_set_icmp_type(m, 135);
     match_set_icmp_code(m, 0);
 

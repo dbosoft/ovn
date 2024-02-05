@@ -146,6 +146,7 @@ Eric Garver                        e@erig.me
 Eric Sesterhenn                    eric.sesterhenn@lsexperts.de
 Ethan J. Jackson                   ejj@eecs.berkeley.edu
 Ethan Rahn                         erahn@arista.com
+Evgenii Kovalev                    ekovalev.off@gmail.com
 Eziz Durdyyev                      ezizdurdy@gmail.com
 Fabrizio D'Angelo                  fdangelo@redhat.com
 Felix Huettner                     felix.huettner@mail.schwarz
@@ -268,8 +269,9 @@ Mark Michelson                     mmichels@redhat.com
 Markos Chandras                    mchandras@suse.de
 Martin Casado                      casado@cs.stanford.edu
 Martin Fong                        mwfong@csl.sri.com
-Martino Fornasa                    mf@fornasa.it
+Martin Kalcok                      martin.kalcok@canonical.com
 Martin Xu                          martinxu9.ovs@gmail.com
+Martino Fornasa                    mf@fornasa.it
 Maryam Tahhan                      maryam.tahhan@intel.com
 Matteo Croce                       mcroce@redhat.com
 Matthias May                       matthias.may@neratec.com
@@ -364,8 +366,7 @@ Shashank Ram                       rams@vmware.com
 Shashwat Srivastava                shashwat.srivastava@tcs.com
 Shih-Hao Li                        shihli@vmware.com
 Shu Shen                           shu.shen@radisys.com
-Simon Horman                       horms@verge.net.au
-Simon Horman                       simon.horman@netronome.com
+Simon Horman                       horms@ovn.org
 Sorin Vinturis                     svinturis@cloudbasesolutions.com
 Steffen Gebert                     steffen.gebert@informatik.uni-wuerzburg.de
 Sten Spans                         sten@blinkenlights.nl
@@ -378,6 +379,7 @@ SUGYO Kazushi                      sugyo.org@gmail.com
 Surya Seetharaman                  suryaseetharaman.9@gmail.com
 Sven Haardiek                      sven.haardiek@uni-muenster.de
 Tadaaki Nagao                      nagao@stratosphere.co.jp
+Tao Liu                            taoliu828@163.com
 Terry Wilson                       twilson@redhat.com
 Tetsuo NAKAGAWA                    nakagawa@mxc.nes.nec.co.jp
 Thadeu Lima de Souza Cascardo      cascardo@cascardo.eti.br
@@ -409,12 +411,13 @@ wangqianyu                         wang.qianyu@zte.com.cn
 wangchuanlei                       wangchuanlei@inspur.com
 Wang Sheng-Hui                     shhuiw@gmail.com
 Wang Zhike                         wangzhike@jd.com
-Wei Li                             liw@dtdream.com
+Wei Li                             liw@yusur.tech
 Wei Yongjun                        yjwei@cn.fujitsu.com
 Wenyu Zhang                        wenyuz@vmware.com
 William Fulton
 William Tu                         u9012063@gmail.com
 Xiao Liang                         shaw.leon@gmail.com
+Xie Liu                            liushyshy@gmail.com
 xu rong                            xu.rong@zte.com.cn
 YAMAMOTO Takashi                   yamamoto@midokura.com
 Yasuhito Takamiya                  yasuhito@gmail.com
@@ -503,6 +506,7 @@ Christian Stigen Larsen         cslarsen@gmail.com
 Christopher Paggen              cpaggen@cisco.com
 Chunhe Li                       lichunhe@huawei.com
 Daniel Badea                    daniel.badea@windriver.com
+Daniel Ding                     danieldin186@gmail.com
 Darragh O'Reilly                darragh.oreilly@hpe.com
 Dave Walker                     DaveWalker@ubuntu.com
 David Evans                     davidjoshuaevans@gmail.com
@@ -547,6 +551,7 @@ Hyojoon Kim                     joonk@gatech.edu
 Igor Ganichev
 Igor Sever                      igor@xorops.com
 Jacob Cherkas                   cherkasj@vmware.com
+Jacob Tanenbaum                 jtanenba@redhat.com
 Jad Naous                       jnaous@gmail.com
 Jamal Hadi Salim                hadi@cyberus.ca
 James Schmidt                   jschmidt@vmware.com
@@ -612,6 +617,7 @@ Oscar Wilde                     xdxiaobin@gmail.com
 Pankaj Thakkar                  pthakkar@vmware.com
 Pasi Kärkkäinen                 pasik@iki.fi
 Patrik Andersson R              patrik.r.andersson@ericsson.com
+Patryk Diak                     pdiak@redhat.com
 Paul Greenberg
 Paulo Cravero                   pcravero@as2594.net
 Pawan Shukla                    shuklap@vmware.com

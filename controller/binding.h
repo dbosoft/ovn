@@ -22,7 +22,9 @@
 #include "openvswitch/hmap.h"
 #include "openvswitch/uuid.h"
 #include "openvswitch/list.h"
+# include "lib/ovn-util.h"
 #include "sset.h"
+#include "lport.h"
 
 struct hmap;
 struct ovsdb_idl;
@@ -46,7 +48,8 @@ struct binding_ctx_in {
     struct ovsdb_idl_index *sbrec_datapath_binding_by_key;
     struct ovsdb_idl_index *sbrec_port_binding_by_datapath;
     struct ovsdb_idl_index *sbrec_port_binding_by_name;
-    const struct ovsrec_port_table *port_table;
+    struct ovsdb_idl_index *ovsrec_port_by_qos;
+    struct ovsdb_idl_index *ovsrec_queue_by_external_ids;
     const struct ovsrec_qos_table *qos_table;
     const struct sbrec_port_binding_table *port_binding_table;
     const struct ovsrec_bridge *br_int;
@@ -91,7 +94,7 @@ struct binding_ctx_out {
      */
     bool non_vif_ports_changed;
 
-    struct sset *egress_ifaces;
+    struct hmap *qos_map;
     /* smap of OVS interface name as key and
      * OVS interface external_ids:iface-id as value. */
     struct smap *local_iface_ids;
@@ -105,6 +108,9 @@ struct binding_ctx_out {
     struct if_status_mgr *if_mgr;
 
     struct sset *postponed_ports;
+
+    bool localnet_learn_fdb;
+    bool localnet_learn_fdb_changed;
 };
 
 /* Local bindings. binding.c module binds the logical port (represented by
@@ -150,7 +156,7 @@ void local_binding_data_init(struct local_binding_data *);
 void local_binding_data_destroy(struct local_binding_data *);
 
 const struct sbrec_port_binding *local_binding_get_primary_pb(
-    struct shash *local_bindings, const char *pb_name);
+    const struct shash *local_bindings, const char *pb_name);
 ofp_port_t local_binding_get_lport_ofport(const struct shash *local_bindings,
                                           const char *pb_name);
 
@@ -158,6 +164,14 @@ bool local_binding_is_up(struct shash *local_bindings, const char *pb_name,
                          const struct sbrec_chassis *);
 bool local_binding_is_down(struct shash *local_bindings, const char *pb_name,
                            const struct sbrec_chassis *);
+
+bool local_binding_is_ovn_installed(struct shash *local_bindings,
+                                    const char *pb_name);
+void local_binding_remove_ovn_installed(
+        struct shash *local_bindings,
+        const struct ovsrec_interface_table *iface_table,
+        const char *pb_name,
+        bool ovs_readonly);
 
 void local_binding_set_up(struct shash *local_bindings, const char *pb_name,
                           const struct sbrec_chassis *chassis_rec,
@@ -169,7 +183,7 @@ void local_binding_set_down(struct shash *local_bindings, const char *pb_name,
 void local_binding_set_pb(struct shash *local_bindings, const char *pb_name,
                           const struct sbrec_chassis *chassis_rec,
                           struct hmap *tracked_datapaths,
-                          bool is_set);
+                          bool is_set, enum can_bind);
 bool local_bindings_pb_chassis_is_set(struct shash *local_bindings,
                                       const char *pb_name,
                                       const struct sbrec_chassis *chassis_rec);
@@ -194,25 +208,30 @@ bool is_additional_chassis(const struct sbrec_port_binding *pb,
 void set_pb_chassis_in_sbrec(const struct sbrec_port_binding *pb,
                              const struct sbrec_chassis *chassis_rec,
                              bool is_set);
+void
+set_pb_additional_chassis_in_sbrec(const struct sbrec_port_binding *pb,
+                                   const struct sbrec_chassis *chassis_rec,
+                                   bool is_set);
 
-/* Corresponds to each Port_Binding.type. */
-enum en_lport_type {
-    LP_UNKNOWN,
-    LP_VIF,
-    LP_CONTAINER,
-    LP_PATCH,
-    LP_L3GATEWAY,
-    LP_LOCALNET,
-    LP_LOCALPORT,
-    LP_L2GATEWAY,
-    LP_VTEP,
-    LP_CHASSISREDIRECT,
-    LP_VIRTUAL,
-    LP_EXTERNAL,
-    LP_REMOTE
-};
+void remove_ovn_installed_for_uuid(const struct ovsrec_interface_table *,
+                                   const struct uuid *);
 
-enum en_lport_type get_lport_type(const struct sbrec_port_binding *);
+void port_binding_set_down(const struct sbrec_chassis *chassis_rec,
+                           const struct sbrec_port_binding_table *pb_table,
+                           const char *iface_id,
+                           const struct uuid *pb_uuid);
+void port_binding_set_up(const struct sbrec_chassis *chassis_rec,
+                         const struct sbrec_port_binding_table *,
+                         const char *iface_id,
+                         const struct uuid *pb_uuid);
+void port_binding_set_pb(const struct sbrec_chassis *chassis_rec,
+                         const struct sbrec_port_binding_table *,
+                         const char *iface_id,
+                         const struct uuid *pb_uuid,
+                         enum can_bind bind_type);
+bool port_binding_pb_chassis_is_set(const struct sbrec_chassis *chassis_rec,
+                                    const struct sbrec_port_binding_table *,
+                                    const struct uuid *pb_uuid);
 
 /* This structure represents a logical port (or port binding)
  * which is associated with 'struct local_binding'.
@@ -244,4 +263,22 @@ void binding_wait(void);
 /* Clean up module state. */
 void binding_destroy(void);
 
+void destroy_qos_map(struct hmap *);
+
+void update_qos(struct ovsdb_idl_index * sbrec_port_binding_by_name,
+                struct ovsdb_idl_txn *ovs_idl_txn,
+                struct ovsdb_idl_index *ovsrec_port_by_qos,
+                const struct ovsrec_qos_table *qos_table,
+                struct hmap *qos_map,
+                const struct ovsrec_open_vswitch_table *ovs_table,
+                const struct ovsrec_bridge_table *bridge_table);
+
+bool lport_maybe_postpone(const char *port_name, long long int now,
+                          struct sset *postponed_ports);
+
+void claimed_lport_set_up(const struct sbrec_port_binding *pb,
+                          const struct sbrec_port_binding *parent_pb);
+bool port_binding_is_up(const struct sbrec_chassis *chassis_rec,
+                        const struct sbrec_port_binding_table *,
+                        const struct uuid *pb_uuid);
 #endif /* controller/binding.h */

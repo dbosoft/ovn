@@ -50,7 +50,7 @@ Scheduling`_ for the timing of each stage:
    Please propose and discuss exceptions on ovs-dev.
  
 2. Fork a release branch from main, named for the expected release number,
-   e.g. "branch-2019.10" for the branch that will yield OVN 2019.10.x.
+   e.g. "branch-25.09" for the branch that will yield OVN 25.09.x.
 
    Release branches are intended for testing and stabilization.  At this stage
    and in later stages, they should receive only bug fixes, not new features.
@@ -64,39 +64,60 @@ Scheduling`_ for the timing of each stage:
    branch.  Features to be added to release branches should be limited in scope
    and risk and discussed on ovs-dev before creating the branch.
 
+   In order to keep the CI stable on the new release branch, the Ubuntu
+   container should be pinned to the current LTS version in the Dockerfile
+   e.g. registry.hub.docker.com/library/ubuntu:22.04.
+
 3. When committers come to rough consensus that the release is ready, they
-   release the .0 release on its branch, e.g. 2019.10.0 for branch-2019.10.  To
+   release the .0 release on its branch, e.g. 25.09.0 for branch-25.09.  To
    make the actual release, a committer pushes a signed tag named, e.g.
-   v2019.10.0, to the OVN repository, makes a release tarball available on
+   v25.09.0, to the OVN repository, makes a release tarball available on
    openvswitch.org, and posts a release announcement to ovs-announce.
 
 4. As bug fixes accumulate, or after important bugs or vulnerabilities are
-   fixed, committers may make additional releases from a branch: 2019.10.1,
-   2019.10.2, and so on.  The process is the same for these additional release
+   fixed, committers may make additional releases from a branch: 25.09.1,
+   25.09.2, and so on.  The process is the same for these additional release
    as for a .0 release.
 
 .. _long-term-support:
 
-Long-term Support Releases
+Long-term Support Branches
 --------------------------
 
-The OVN project will periodically designate a release as "long-term support" or
-LTS for short. An LTS release has the distinction of being maintained for
-longer than a standard release.
+The OVN project will periodically designate a release branch as
+"long-term support" or LTS for short. An LTS branch has the distinction of
+being maintained for longer than a standard branch.
 
-LTS releases will receive bug fixes until the point that another LTS is
-released. At that point, the old LTS will receive an additional year of
-critical and security fixes. Critical fixes are those that are required to
-ensure basic operation (e.g. memory leak fixes, crash fixes). Security fixes
-are those that address concerns about exploitable flaws in OVN and that have a
-corresponding CVE report.
+LTS branches will receive bug fixes and have releases made regularly until the
+point that another LTS is released. At that point, the old LTS will receive an
+additional year of critical and security fixes. Critical fixes are those that
+are required to ensure basic operation (e.g. memory leak fixes, crash fixes).
+Security fixes are those that address concerns about exploitable flaws in OVN
+and that have a corresponding CVE report. Whenever such a fix is applied, a new
+release will be made for the LTS version.
 
-LTS releases are scheduled to be released once every two years. This means
+LTS branches are scheduled to be created once every two years. This means
 that any given LTS will receive bug fix support for two years, followed by
 one year of critical bug fixes and security fixes.
 
 The current LTS version is documented on the `Long Term Support Releases`__
 page of `ovn.org`__.
+
+Standard-term Support Versions
+------------------------------
+
+Versions of OVN that are not designated as LTS versions are standard-term
+support releases.
+
+Standard term support versions will have releases made regularly for one year.
+There are no additional windows for which releases will be made for critical
+or security fixes.
+
+The branches for standard term support versions may receive bug fixes and
+critical and security fixes after the OVN team has stopped creating regular
+releases. This is strictly to facilitate easy backporting of fixes to LTS
+versions that are still receiving regular releases. Even though the branch may
+receive additional fixes, no releases will be made with these fixes.
 
 Release Numbering
 -----------------
@@ -120,27 +141,42 @@ with an unspecified date.
 Release Scheduling
 ------------------
 
-OVN makes releases at the following three-month cadence.  All dates are
+OVN makes releases at the following six-month cadence.  All dates are
 approximate:
 
 +---------------+---------------------+--------------------------------------+
 | Time (months) | Example Dates       | Stage                                |
 +---------------+---------------------+--------------------------------------+
-| T             | Dec 1, Mar 1, ...   | Begin x.y release cycle              |
+| T             | Mar 1, Sep 1, ...   | Begin x.y release cycle              |
 +---------------+---------------------+--------------------------------------+
-| T + 2         | Feb 1, May 1, ...   | "Soft freeze" main for x.y release   |
+| T + 4.5       | Jul 15, Jan 15, ... | "Soft freeze" main for x.y release   |
 +---------------+---------------------+--------------------------------------+
-| T + 2.5       | Feb 15, May 15, ... | Fork branch-x.y from main            |
+| T + 5         | Aug 1, Feb 1, ...   | Fork branch-x.y from main            |
 +---------------+---------------------+--------------------------------------+
-| T + 3         | Mar 1, Jun 1, ...   | Release version x.y.0                |
+| T + 6         | Sep 1, Mar 1, ...   | Release version x.y.0                |
 +---------------+---------------------+--------------------------------------+
+
+Subsequent Releases
+~~~~~~~~~~~~~~~~~~~
+
+Beyond the .0 release of an OVN version, we will schedule further regular
+releases from its development branch. The most recent release branch, as well
+as the current LTS branch, will receive new releases every two months. If the
+most recent release branch is an LTS branch, then that branch alone will have
+releases made every two months. Other standard-term support branches that are
+still under support  will receive new releases every three months. If for some
+reason, no changes occur to a supported OVN branch during a release period,
+then no release will be made on that branch for that period. Therefore, there
+is no guarantee about the exact number of releases to be expected for any given
+OVN version.
 
 Release Calendar
 ----------------
 
 The 2023 timetable is shown below. Note that these dates are not set in stone.
 If extenuating circumstances arise, a release may be delayed from its target
-date.
+date. Also note that the release policy changed partway through 2023, which is
+why the release dates and timetables do not line up with the example above.
 
 +---------+-------------+-----------------+---------+
 | Release | Soft Freeze | Branch Creation | Release |
@@ -151,21 +187,15 @@ date.
 +---------+-------------+-----------------+---------+
 | 23.09.0 | Aug 4       | Aug 18          | Sep 1   |
 +---------+-------------+-----------------+---------+
-| 23.12.0 | Nov 3       | Nov 17          | Dec 1   |
-+---------+-------------+-----------------+---------+
 
 Below is the 2024 timetable
 
 +---------+-------------+-----------------+---------+
 | Release | Soft Freeze | Branch Creation | Release |
 +---------+-------------+-----------------+---------+
-| 24.03.0 | Feb 2       | Feb 16          | Mar 1   |
+| 24.03.0 | Jan 19      | Feb 2           | Mar 1   |
 +---------+-------------+-----------------+---------+
-| 24.06.0 | May 10      | May 24          | Jun 7   |
-+---------+-------------+-----------------+---------+
-| 24.09.0 | Aug 9       | Aug 23          | Sep 6   |
-+---------+-------------+-----------------+---------+
-| 24.12.0 | Nov 8       | Nov 22          | Dec 6   |
+| 24.09.0 | Jul 19      | Aug 2           | Sep 6   |
 +---------+-------------+-----------------+---------+
 
 Contact
