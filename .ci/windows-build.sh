@@ -6,7 +6,7 @@ set -x
 COMMON_CFLAGS="-g -O2"
 OVN_CFLAGS=""
 EXTRA_OPTS="--with-pthread=`realpath ./ovs/PTHREADS-BUILT | xargs cygpath -m`"
-
+JOBS=${JOBS:-"-j4"}
 
 function configure_ovs()
 {
@@ -15,7 +15,7 @@ function configure_ovs()
     ./configure CC="./build-aux/cccl" LD="`which link`" \
     LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
     CFLAGS="${COMMON_CFLAGS}" $* || { cat config.log; exit 1; }
-    make -j || { cat config.log; exit 1; }
+    make $JOBS || { cat config.log; exit 1; }
     popd
 }
 
@@ -31,7 +31,7 @@ function configure_ovn()
 
 OPTS="${EXTRA_OPTS} ${OPTS} $*"
 configure_ovn $OPTS
-make -j || { cat config.log; exit 1; }
+make $JOBS || { cat config.log; exit 1; }
 
 if [ "$TESTSUITE" ]; then
     if ! make check RECHECK=yes; then
