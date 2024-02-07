@@ -82,6 +82,7 @@ struct worker_control {
     struct ovs_mutex mutex; /* Guards the data. */
     void *data; /* Pointer to data to be processed. */
     pthread_t worker;
+    bool hasWorker;
     struct worker_pool *pool;
 };
 
