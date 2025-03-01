@@ -21,6 +21,13 @@
 
 VLOG_DEFINE_THIS_MODULE(ovsport);
 
+/* macro interface is already defined in Windows headers,
+   undef until end of file */
+#ifdef _WIN32    
+    #pragma push_macro("interface")
+    #undef interface
+#endif
+
 /* Create a port and interface record and add it to 'bridge' in the Open
  * vSwitch database represented by 'ovs_idl_txn'.
  *
@@ -289,3 +296,9 @@ get_iface_mtu(const struct ovsrec_interface *iface)
     }
     return (uint16_t) iface->mtu[0];
 }
+
+
+/* restore macro interface from Windows headers*/
+#ifdef _WIN32    
+    #pragma pop_macro("interface")
+#endif
