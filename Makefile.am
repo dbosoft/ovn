@@ -98,6 +98,7 @@ EXTRA_DIST = \
 	.ci/ovn-kubernetes/custom.patch \
 	.github/workflows/containers.yml \
 	.github/workflows/test.yml \
+	.github/workflows/build-and-test-windows.yml \	
 	.github/workflows/ovn-kubernetes.yml \
 	.github/workflows/ovn-fake-multinode-tests.yml \
 	.readthedocs.yaml \
