@@ -103,7 +103,9 @@ static bool sync_lflow_to_sb(struct ovn_lflow *,
 /* TODO:  Move the parallization logic to this module to avoid accessing
  * and modifying in both northd.c and lflow-mgr.c. */
 extern int parallelization_state;
+#ifndef _WIN32
 extern thread_local size_t thread_lflow_counter;
+#endif
 extern int search_mode;
 
 
