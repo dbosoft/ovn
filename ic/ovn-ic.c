@@ -1612,7 +1612,7 @@ add_to_routes_ad(struct hmap *routes_ad, const struct in6_addr prefix,
         route_table = "";
     }
 
-    uint hash = ic_route_hash(&prefix, plen, &nexthop, origin,
+    unsigned int hash = ic_route_hash(&prefix, plen, &nexthop, origin,
                               route_table, NULL, override_connected);
 
     if (!ic_route_find(routes_ad, &prefix, plen, &nexthop, origin, route_table,
