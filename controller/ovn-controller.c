@@ -141,6 +141,13 @@ static unixctl_cb_func debug_delay_nb_cfg_report;
 #define OVS_NB_CFG_TS_NAME "ovn-nb-cfg-ts"
 #define OVS_STARTUP_TS_NAME "ovn-startup-ts"
 
+/* macro interface is already defined in Windows headers,
+   undef until end of file for OVS_NODE */
+#ifdef _WIN32
+    #pragma push_macro("interface")
+    #undef interface
+#endif
+
 struct br_int_remote {
     char *target;
     int probe_interval;
@@ -3877,7 +3884,7 @@ struct ed_type_lflow_output {
     /* meter ids for QoS */
     struct ovn_extend_table meter_table;
     /* lflow <-> resource cross reference */
-    struct objdep_mgr lflow_deps_mgr;;
+    struct objdep_mgr lflow_deps_mgr;
     /* conjunciton ID usage information of lflows */
     struct conj_ids conj_ids;
 
@@ -8712,3 +8719,8 @@ debug_dump_local_mac_bindings(struct unixctl_conn *conn, int argc OVS_UNUSED,
     unixctl_command_reply(conn, ds_cstr(&mb_str));
     ds_destroy(&mb_str);
 }
+
+/* restore macro interface from Windows headers*/
+#ifdef _WIN32
+    #pragma pop_macro("interface")
+#endif
