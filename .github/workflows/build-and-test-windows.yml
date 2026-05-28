@@ -9,7 +9,12 @@ jobs:
       OPTS: --with-vstudiotarget=${{ matrix.target }} ${{ matrix.opts }}
       TESTSUITE: ${{ matrix.testsuite }}
     
-    runs-on: windows-latest
+    # windows-latest currently maps to windows-2025, which dropped the WDK
+    # (kept the VSIX though). windows-2022 still preinstalls both. The OVN
+    # build also compiles the OVS submodule's kernel driver due to
+    # --with-vstudiotarget=Release, so the WDK is required here too. Pin
+    # until windows-2022 is deprecated.
+    runs-on: windows-2022
     timeout-minutes: 60
     
     strategy:
