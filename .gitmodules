@@ -1,4 +1,4 @@
 [submodule "ovs"]
 	path = ovs
 	url = https://github.com/dbosoft/ovs.git
-	branch = dbosoft-resync-3.7.0
+	branch = dbosoft-main
