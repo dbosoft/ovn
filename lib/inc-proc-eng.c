@@ -41,8 +41,14 @@ static bool engine_force_recompute = false;
 static bool engine_run_canceled = false;
 static const struct engine_context *engine_context;
 
-static struct vector engine_nodes =
-    VECTOR_EMPTY_INITIALIZER(struct engine_node *);
+/* Avoid VECTOR_EMPTY_INITIALIZER macro here: it expands to a compound
+ * literal which MSVC rejects as a static initializer (C2099). */
+static struct vector engine_nodes = {
+    .buffer = NULL,
+    .len = 0,
+    .esize = sizeof(struct engine_node *),
+    .capacity = 0,
+};
 
 static const char *engine_node_state_name[EN_STATE_MAX] = {
     [EN_STALE]     = "Stale",

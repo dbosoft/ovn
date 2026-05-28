@@ -39,8 +39,14 @@ struct ofctrl_seqno_update {
 };
 
 /* List of in flight sequence number updates. */
-static struct vector ofctrl_seqno_updates =
-    VECTOR_EMPTY_INITIALIZER(struct ofctrl_seqno_update);
+/* Avoid VECTOR_EMPTY_INITIALIZER here: compound literal as static
+ * initializer is rejected by MSVC (C2099). */
+static struct vector ofctrl_seqno_updates = {
+    .buffer = NULL,
+    .len = 0,
+    .esize = sizeof(struct ofctrl_seqno_update),
+    .capacity = 0,
+};
 
 /* Last sequence number request sent to OVS. */
 static uint64_t ofctrl_req_seqno;
@@ -55,8 +61,14 @@ struct ofctrl_seqno_state {
 };
 
 /* Per application seqno type states. */
-static struct vector ofctrl_seqno_states =
-    VECTOR_EMPTY_INITIALIZER(struct ofctrl_seqno_state);
+/* Avoid VECTOR_EMPTY_INITIALIZER here: compound literal as static
+ * initializer is rejected by MSVC (C2099). */
+static struct vector ofctrl_seqno_states = {
+    .buffer = NULL,
+    .len = 0,
+    .esize = sizeof(struct ofctrl_seqno_state),
+    .capacity = 0,
+};
 
 /* ofctrl_seqno_state related static function prototypes. */
 static struct ofctrl_seqno_state *ofctrl_seqno_state_get(size_t seqno_type);
