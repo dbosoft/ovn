@@ -44,6 +44,13 @@
 #include "lib/ofctrl-seqno.h"
 #include "lib/ovn-util.h"
 
+/* macro interface is already defined in Windows headers,
+   undef until end of file for OVS_NODE */
+#ifdef _WIN32
+    #pragma push_macro("interface")
+    #undef interface
+#endif
+
 VLOG_DEFINE_THIS_MODULE(main);
 
 static char *parse_options(int argc, char *argv[]);
@@ -559,3 +566,8 @@ get_ovnbr_cfg(const struct ovnbrrec_br_global_table *br_global_table,
     br_cfg = br_global ? br_global->br_cfg : 0;
     return br_cfg;
 }
+
+/* restore macro interface from Windows headers*/
+#ifdef _WIN32
+    #pragma pop_macro("interface")
+#endif
