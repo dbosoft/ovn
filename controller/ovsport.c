@@ -208,9 +208,9 @@ ovsport_lookup_by_interfaces(
 const struct
 ovsrec_port * ovsport_lookup_by_interface(
         struct ovsdb_idl_index *ovsrec_port_by_interfaces,
-        struct ovsrec_interface *interface)
+        struct ovsrec_interface *iface)
 {
-    struct ovsrec_interface *interfaces[] = {interface};
+    struct ovsrec_interface *interfaces[] = {iface};
 
     return ovsport_lookup_by_interfaces(ovsrec_port_by_interfaces,
                                         interfaces, 1);
