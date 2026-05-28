@@ -296,7 +296,11 @@ enum ovn_lflow_table_search_mode {
     LFLOW_TABLE_SEARCH_FIELDS,
     LFLOW_TABLE_SEARCH_SBUUID,
 };
+#ifdef _WIN32
+static __declspec(thread) size_t thread_lflow_counter = 0;
+#else
 extern thread_local size_t thread_lflow_counter;
+#endif
 
 /*
  * Multicast snooping and querier per datapath configuration.
