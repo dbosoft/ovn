@@ -180,8 +180,6 @@ jobs:
         run: |
           cp /c/PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
           cp /c/PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
-          cp /c/PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
-          cp /c/PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
           cp /c/OpenSSL-Win64/libcrypto-3-x64.dll /C/openvswitch/usr/sbin
           cp /c/OpenSSL-Win64/libcrypto-3-x64.dll /C/openvswitch/usr/bin
           cp /c/OpenSSL-Win64/libssl-3-x64.dll /C/openvswitch/usr/sbin
@@ -192,6 +190,12 @@ jobs:
           cp ./ovs/datapath-windows/misc/* /C/openvswitch/driver
           cp ./ovs/datapath-windows/ovsext/x64/Win10${{ matrix.target }}/DBO_OVSE.pdb /C/openvswitch/driver
           mv /C/openvswitch/driver/ovsext.inf /C/openvswitch/driver/DBO_OVSE.inf
+          # Embed top-level docs so the artifact is a self-contained
+          # unsigned ovnpackage layout (driver/ + usr/{bin,sbin,share,*.txt}).
+          # OVN-leading: LICENSE/NOTICE/NEWS come from the OVN repo root.
+          cp ./LICENSE /C/openvswitch/usr/LICENSE.txt
+          cp ./NOTICE  /C/openvswitch/usr/NOTICE.txt
+          cp ./NEWS    /C/openvswitch/usr/NEWS.txt
       - name: upload build artifacts
         uses: actions/upload-artifact@v4.6.1
         with:
