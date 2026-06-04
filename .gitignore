@@ -97,3 +97,6 @@ testsuite.tmp.orig
 /.venv
 /cxx-check
 /*.ovsschema.stamp
+
+# dbosoft Windows CMake overlay build output
+/build-cmake/
