@@ -1,14 +1,17 @@
-name: Build for Windows (CMake)
+name: Build for Windows
 
 # MSYS-free Windows build of the dbosoft OVN CMake overlay: configure + build
-# libovn (and the OVS submodule) with MSVC.  Replaces the old autotools/MSYS2
-# path (boot.sh + configure + make), which no longer works: upstream OVS removed
-# Windows support, so there is no autotools-built OVS tree for OVN's MSYS build
-# to consume.  OVN now builds against the OVS CMake overlay instead.
+# libovn (and the OVS submodule) with MSVC, install the userspace, build the
+# dual-NDIS kernel driver, and assemble the unsigned ovnpackage artifact.
+# Replaces the old autotools/MSYS2 path (boot.sh + configure + make), which no
+# longer works: upstream OVS removed Windows support, so there is no
+# autotools-built OVS tree for OVN's MSYS build to consume.  OVN now builds
+# against the OVS CMake overlay instead.
 #
-# Dependency setup (OpenSSL download, pthreads4w build) mirrors the OVS Windows
-# workflow.  The OVS kernel driver + signed package build separately via MSBuild
-# + the dbosoft patches in ovs-patches; that path is not covered here.
+# The uploaded "ovn-windows-Release" artifact is the full C:\openvswitch tree
+# (driver/ + usr/{bin,sbin,share,*.txt}) -- the unsigned ovnpackage layout the
+# dbosoft ovs-patches/packaging scripts (fetch-gh-build / build-ovn-package)
+# consume to produce the MS-signed release package.
 
 on:
   push:
@@ -19,9 +22,9 @@ on:
 jobs:
   build-windows-cmake:
     name: windows cmake msvc
-    # windows-2022 ships VS2022 + the Windows SDK.
+    # windows-2022 ships VS2022 + the WDK (needed for the kernel driver build).
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: checkout
@@ -74,6 +77,81 @@ jobs:
       - name: cmake build
         shell: cmd
         run: cmake --build build --config Release
+
+      # Install the userspace into the C:/openvswitch/usr layout the packaging
+      # scripts expect: daemons in usr/sbin, tools in usr/bin, schemas in
+      # usr/share/{openvswitch,ovn}.
+      - name: cmake install
+        shell: cmd
+        run: cmake --install build --config Release --prefix C:/openvswitch/usr
+
+      # Generate the driver's netlink interface header from <linux/openvswitch.h>.
+      # The kernel driver (ovsext) includes datapath-windows/include/OvsDpInterface.h,
+      # a generated (gitignored) file the old autotools "make" produced via this sed
+      # script.  The CMake overlay only emits the userspace odp-netlink.h, so produce
+      # the driver copy here before the MSBuild driver build (bash/sed ships with the
+      # runner's Git; mirrors the original Makefile rule).
+      - name: generate driver netlink header (OvsDpInterface.h)
+        shell: bash
+        run: >
+          sed -f ovs/build-aux/extract-odp-netlink-windows-dp-h
+          < ovs/include/linux/openvswitch.h
+          > ovs/datapath-windows/include/OvsDpInterface.h
+
+      # The WDK test-sign step and package-dual.ps1 both expect a "WDKTestCert"
+      # code-signing certificate in the store.  A dev box has one from an earlier
+      # WDK build; a fresh runner has none, so create it (MSBuild finds it by name)
+      # and trust it (so package-dual.ps1's `signtool verify /pa` passes).
+      - name: create WDK test certificate
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert `
+            -Subject 'CN=WDKTestCert' -FriendlyName 'WDKTestCert' `
+            -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable `
+            -NotAfter (Get-Date).AddYears(6)
+          $cer = "$env:RUNNER_TEMP\wdktest.cer"
+          Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+          Write-Host "Created WDKTestCert $($cert.Thumbprint)"
+
+      # Build BOTH NDIS tiers of the forwarding-extension driver (6.85 modern +
+      # 6.60 floor) and test-sign them into one dual-model package.  Uses the WDK
+      # + VS2022 MSBuild on the runner (the same toolchain the old autotools build
+      # drove via --with-vstudiotarget).
+      - name: build kernel driver (dual NDIS)
+        shell: pwsh
+        run: ./ovs/datapath-windows/package-dual.ps1 -Config Release
+
+      # Assemble the full C:\openvswitch package tree (driver/ + usr/) so the
+      # uploaded artifact IS the unsigned ovnpackage layout.
+      - name: assemble package
+        shell: pwsh
+        run: |
+          $ovs = 'C:\openvswitch'
+          # Bundle pthreads + OpenSSL DLLs next to both the tools and the daemons
+          # so the package is self-contained.
+          foreach ($d in "$ovs\usr\bin", "$ovs\usr\sbin") {
+            Copy-Item C:\PTHREADS-BUILT\bin\pthreadVC3.dll $d
+            Copy-Item C:\OpenSSL-Win64\libcrypto-3-x64.dll $d
+            Copy-Item C:\OpenSSL-Win64\libssl-3-x64.dll    $d
+          }
+          # driver/ from the dual-binary package; the INF ships as DBO_OVSE.inf.
+          New-Item -ItemType Directory -Force "$ovs\driver" | Out-Null
+          Copy-Item ovs\datapath-windows\x64\dual-Release\package\* "$ovs\driver"
+          Move-Item "$ovs\driver\ovsext.inf" "$ovs\driver\DBO_OVSE.inf" -Force
+          # Top-level docs under usr/ (OVN-leading: from the OVN repo root).
+          Copy-Item LICENSE "$ovs\usr\LICENSE.txt"
+          Copy-Item NOTICE  "$ovs\usr\NOTICE.txt"
+          Copy-Item NEWS    "$ovs\usr\NEWS.txt"
+          Get-ChildItem -Recurse $ovs | Where-Object { -not $_.PSIsContainer } |
+            ForEach-Object { $_.FullName.Replace($ovs, '') }
+
+      - name: upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ovn-windows-Release
+          path: C:\openvswitch
 
       - name: upload logs on failure
         if: failure()
