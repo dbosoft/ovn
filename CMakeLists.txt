@@ -60,12 +60,12 @@ configure_file("${OVN_ROOT}/include/ovn/version.h.in"
 # lib/ovn-dirs.c — the @VAR@ substitutions must include the surrounding quotes
 # (the autotools sed wraps each value in ""); srcdir stays bare (used in #line).
 set(srcdir     "${OVN_ROOT}")
-set(LOGDIR     "\"C:/ProgramData/ovn/var/log/ovn\"")
-set(OVN_RUNDIR "\"C:/ProgramData/ovn/var/run/ovn\"")
-set(DBDIR      "\"C:/ProgramData/ovn/etc/ovn\"")
-set(bindir     "\"C:/ovn/usr/bin\"")
-set(sysconfdir "\"C:/ProgramData/ovn/etc\"")
-set(pkgdatadir "\"C:/ovn/usr/share/ovn\"")
+set(LOGDIR     "\"C:/ProgramData/openvswitch/var/log/ovn\"")
+set(OVN_RUNDIR "\"C:/ProgramData/openvswitch/var/run/ovn\"")
+set(DBDIR      "\"C:/ProgramData/openvswitch/etc/ovn\"")
+set(bindir     "\"C:/openvswitch/usr/bin\"")
+set(sysconfdir "\"C:/ProgramData/openvswitch/etc\"")
+set(pkgdatadir "\"C:/openvswitch/usr/share/ovn\"")
 configure_file("${OVN_ROOT}/lib/ovn-dirs.c.in" "${GEN}/lib/ovn-dirs.c" @ONLY)
 
 # --- OVN IDL codegen (5 schemas) via OVS's ovsdb-idlc -----------------------
