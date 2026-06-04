@@ -1,199 +1,84 @@
-name: Build for Windows
+name: Build for Windows (CMake)
 
-on: [push, pull_request]
+# MSYS-free Windows build of the dbosoft OVN CMake overlay: configure + build
+# libovn (and the OVS submodule) with MSVC.  Replaces the old autotools/MSYS2
+# path (boot.sh + configure + make), which no longer works: upstream OVS removed
+# Windows support, so there is no autotools-built OVS tree for OVN's MSYS build
+# to consume.  OVN now builds against the OVS CMake overlay instead.
+#
+# Dependency setup (OpenSSL download, pthreads4w build) mirrors the OVS Windows
+# workflow.  The OVS kernel driver + signed package build separately via MSBuild
+# + the dbosoft patches in ovs-patches; that path is not covered here.
+
+on:
+  push:
+    branches: [dbosoft-main]
+  pull_request:
+  workflow_dispatch:
 
 jobs:
-  build-windows:
-    name: windows ${{ join(matrix.*, ' ') }}
-    env:
-      OPTS: --with-vstudiotarget=${{ matrix.target }} ${{ matrix.opts }}
-      TESTSUITE: ${{ matrix.testsuite }}
-    
-    # windows-latest currently maps to windows-2025, which dropped the WDK
-    # (kept the VSIX though). windows-2022 still preinstalls both. The OVN
-    # build also compiles the OVS submodule's kernel driver due to
-    # --with-vstudiotarget=Release, so the WDK is required here too. Pin
-    # until windows-2022 is deprecated.
+  build-windows-cmake:
+    name: windows cmake msvc
+    # windows-2022 ships VS2022 + the Windows SDK.
     runs-on: windows-2022
-    timeout-minutes: 60
-    
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # run only one job for windows, as more than one be enough currently to verify
-          # PRs
-          # tests are not enabled as they take very long and a lot of them will fail          
-          - target: Release
-          
-    defaults:
-      run:
-         shell: msys2 {0}         
-         
+    timeout-minutes: 45
+
     steps:
       - name: checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v5
         with:
           submodules: recursive
-      - name: install msys 
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          release: false
-          update: true
-          install: base-devel git mingw-w64-ucrt-x86_64-toolchain autotools         
+
       - name: set up python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.x'  
+          python-version: '3.12'
 
-      # pypiwin32 has to be installed with a Windows python version therefore
-      # this step will configure python first on Windows and exports
-      # its location for MSYS bash.  
-      - name: configure python in Windows cmdline
-        shell: cmd
-        run: |
-            python -m pip install --upgrade pip
-            pip install pypiwin32
-            
-            echo Python location: %pythonLocation%
-            echo export pythonLocation="%pythonLocation%" > c:\msys64\home\%USERNAME%\.pythonenv.sh
-            echo export PYTHONPATH="%cd%\python;%cd%\ovs\python;%pythonLocation%\Lib;%pythonLocation%\DLLs;%pythonLocation%\Lib\lib-tk" >> c:\msys64\home\%USERNAME%\.pythonenv.sh
-            echo ".pythonenv.sh was generated in c:\msys64\home\%USERNAME%"
-      - name: install openssl
+      - name: install pywin32
+        # The OVSDB IDL codegen (ovsdb-idlc -> ovs.poller -> ovs.winutils) imports
+        # ntsecuritycon (pywin32) on Windows, so it must be present for configure.
+        run: pip install pywin32
+
+      - name: install OpenSSL 3.0
         shell: powershell
-        run: | 
-            $RUNNER_TEMP = $env:RUNNER_TEMP
-            $ProgressPreference = 'SilentlyContinue'
-
-            Remove-Item -Recurse -Force -Path C:/OpenSSL-Win64 -ErrorAction Continue
-            New-Item -ItemType Directory -Force -Path "$RUNNER_TEMP\ovs-build-downloads"
-        
-            # Find and download the latest stable OpenSSl 3.0.
-            $URL = "https://raw.githubusercontent.com/slproweb/opensslhashes/master/win32_openssl_hashes.json"
-            $webData = (Invoke-WebRequest -UseBasicParsing -Uri $URL).content | ConvertFrom-Json
-            $source = ($webData.files.PSObject.Properties | Where-Object {
-                $_.Value.basever   -match "^3\.0\.[0-9]+" -and
-                $_.Value.bits      -eq    "64"            -and
-                $_.Value.arch      -eq    "INTEL"         -and
-                $_.Value.installer -eq    "exe"           -and
-                -not $_.Value.light
-            } | Select-Object Value | Select -First 1).PSObject.Properties.Value
-        
-            Write-Host "Latest OpenSSL 3.0:" ($source | Format-List | Out-String)
-        
-            $destination = "$RUNNER_TEMP\ovs-build-downloads\Win64OpenSSL.exe"
-            if (Test-Path $destination) {
-                $fileHash = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLower()
-                if ($fileHash -ne $source.sha256) {
-                    Write-Host "Cache miss:" $fileHash "!=" $source.sha256
-                    Remove-Item -Path $destination
-                }
-            }
-        
-            if (Test-Path $destination) {
-                Write-Host "Using cached:" $destination
-            } else {
-                Write-Host "Downloading:" $source.url
-                Invoke-WebRequest -UseBasicParsing $source.url -OutFile $destination
-            }
-        
-            Write-Host "Installing:" $destination
-            Start-Process -FilePath $destination -ArgumentList "/silent /verysilent /sp- /suppressmsgboxes /DIR=C:\OpenSSL-Win64"  -Wait 
-            get-item -Path "C:\OpenSSL-Win64"
-      - name: clone pthread
-        shell: cmd
-        run: git clone -q https://git.code.sf.net/p/pthreads4w/code c:\pthreads4w-code
-      
-      - name: disable link in MSYS
         run: |
-          mv $(which link) $(which link)_copy
-          mv /ucrt64/bin/python3 /ucrt64/bin/python3_off
-      - name: build pthread  
+          $ProgressPreference = 'SilentlyContinue'
+          $dl = "$env:RUNNER_TEMP\ovs-build-downloads"
+          New-Item -ItemType Directory -Force -Path $dl | Out-Null
+          # Latest stable OpenSSL 3.0, 64-bit, full installer (slproweb hashes feed).
+          $url = "https://raw.githubusercontent.com/slproweb/opensslhashes/master/win32_openssl_hashes.json"
+          $web = (Invoke-WebRequest -UseBasicParsing -Uri $url).Content | ConvertFrom-Json
+          $src = ($web.files.PSObject.Properties | Where-Object {
+              $_.Value.basever -match "^3\.0\.[0-9]+" -and $_.Value.bits -eq "64" -and
+              $_.Value.arch -eq "INTEL" -and $_.Value.installer -eq "exe" -and -not $_.Value.light
+          } | Select-Object -First 1).Value
+          $dst = "$dl\Win64OpenSSL.exe"
+          Invoke-WebRequest -UseBasicParsing $src.url -OutFile $dst
+          Start-Process -FilePath $dst -Wait -ArgumentList `
+              "/silent /verysilent /sp- /suppressmsgboxes /DIR=C:\OpenSSL-Win64"
+          Get-Item C:\OpenSSL-Win64
+
+      - name: build pthreads4w
         shell: cmd
         run: |
-          @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
-          c:\MSYS64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "cd /c/pthreads4w-code && nmake all install 2>&1"             
-      - name: generate build script
-        run: |
-          cat > $RUNNER_TEMP/build.sh <<EOF
-          #!/bin/bash
-          set -e
-            source ~/.pythonenv.sh
-            pushd ovs
-            ./boot.sh
-            ./configure CC=build-aux/cccl LD="\`which link\`" \
-                CFLAGS="-Zc:preprocessor" \
-                LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
-                --prefix=C:/openvswitch/usr \
-                --localstatedir=C:/ProgramData/openvswitch/var \
-                --sysconfdir=C:/ProgramData/openvswitch/etc \
-                --with-pthread=c:/PTHREADS-BUILT/ \
-                --enable-ssl --with-openssl=C:/OpenSSL-Win64 \
-                -with-vstudiotargetver=Win10 \
-                $OPTS
-                
-            make -j4
-            make install
+          git clone -q https://git.code.sf.net/p/pthreads4w/code C:\pthreads4w-code
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cd /d C:\pthreads4w-code && nmake DESTROOT=C:\PTHREADS-BUILT all install
 
-            popd
-
-            ./boot.sh
-            ./configure CC=build-aux/cccl LD="\`which link\`" \
-                CFLAGS="-Zc:preprocessor" \
-                LIBS="-lws2_32 -lShlwapi -liphlpapi -lwbemuuid -lole32 -loleaut32" \
-                --prefix=C:/openvswitch/usr \
-                --localstatedir=C:/ProgramData/openvswitch/var \
-                --sysconfdir=C:/ProgramData/openvswitch/etc \
-                --with-pthread=c:/PTHREADS-BUILT/ \
-                --enable-ssl --with-openssl=C:/OpenSSL-Win64 \
-                $OPTS
-                
-            make -j4
-            make install
-                
-          EOF
-          chmod +x $RUNNER_TEMP/build.sh 
-          cat $RUNNER_TEMP/build.sh 
-      - name: build
-        shell: cmd     
+      - name: cmake configure
+        shell: cmd
         run: |
-          @call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 
-          c:\MSYS64\msys2_shell.cmd -ucrt64 -here -defterm -no-start -use-full-path -c "$RUNNER_TEMP/build.sh 2>&1"    
-      - name: upload ovs logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4.6.1
-        with:
-          name: logs-windows-${{ join(matrix.*, '-') }}
-          if-no-files-found: ignore
-          path: ./ovs/config.log
-          
+          cmake -G "Visual Studio 17 2022" -A x64 -S . -B build ^
+            -DPTHREADS_ROOT=C:/PTHREADS-BUILT -DOPENSSL_ROOT=C:/OpenSSL-Win64
+
+      - name: cmake build
+        shell: cmd
+        run: cmake --build build --config Release
+
       - name: upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4.6.1
+        uses: actions/upload-artifact@v4
         with:
-          name: logs-windows-${{ join(matrix.*, '-') }}
+          name: logs-windows-cmake-ovn
           if-no-files-found: ignore
-          path: ./config.log
-          
-      - name: package
-        run: |
-          cp /c/PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
-          cp /c/PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
-          cp /c/PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/sbin
-          cp /c/PTHREADS-BUILT/bin/pthreadVC3.dll /C/openvswitch/usr/bin
-          cp /c/OpenSSL-Win64/libcrypto-3-x64.dll /C/openvswitch/usr/sbin
-          cp /c/OpenSSL-Win64/libcrypto-3-x64.dll /C/openvswitch/usr/bin
-          cp /c/OpenSSL-Win64/libssl-3-x64.dll /C/openvswitch/usr/sbin
-          cp /c/OpenSSL-Win64/libssl-3-x64.dll /C/openvswitch/usr/bin
-          mkdir /C/openvswitch/driver
-          cp ./ovs/datapath-windows/x64/Win10${{ matrix.target }}/package/* /C/openvswitch/driver
-          cp ./ovs/datapath-windows/x64/Win10${{ matrix.target }}/package.cer /C/openvswitch/driver
-          cp ./ovs/datapath-windows/misc/* /C/openvswitch/driver
-          cp ./ovs/datapath-windows/ovsext/x64/Win10${{ matrix.target }}/DBO_OVSE.pdb /C/openvswitch/driver
-          mv /C/openvswitch/driver/ovsext.inf /C/openvswitch/driver/DBO_OVSE.inf
-      - name: upload build artifacts
-        uses: actions/upload-artifact@v4.6.1
-        with:
-          name: ovn-windows-${{ join(matrix.*, '-') }}
-          path: c:\openvswitch
+          path: build/**/*.log
