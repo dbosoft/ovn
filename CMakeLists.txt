@@ -29,9 +29,11 @@ set(CMAKE_C_STANDARD 11)
 add_subdirectory(ovs)
 set(OVS_GEN "${CMAKE_BINARY_DIR}/gen")   # ovs/CMakeLists.txt uses ${CMAKE_BINARY_DIR}/gen
 
-# OVN-generated files go to a SEPARATE dir so OVN's config.h (this version) wins
-# over OVS's config.h; ${OVS_GEN} itself is intentionally NOT on OVN's include
-# path (only its include/ and lib/ subdirs), so OVN never picks up OVS's config.h.
+# OVN-generated files go to a SEPARATE dir (${GEN}) listed FIRST on the include
+# path so OVN's config.h (this version) wins over OVS's config.h in ${OVS_GEN}.
+# ${OVS_GEN} itself must still be on the path (after ${GEN}) because OVN includes
+# OVS's generated IDL headers as "lib/vswitch-idl.h", which only resolves with the
+# OVS gen root on the path -- not just its include/ and lib/ subdirs.
 set(GEN "${CMAKE_BINARY_DIR}/gen-ovn")
 file(MAKE_DIRECTORY "${GEN}" "${GEN}/lib" "${GEN}/include/ovn")
 
@@ -124,7 +126,7 @@ set(OVN_INCLUDES
   "${OVN_ROOT}/include/windows"
   "${OVS_ROOT}" "${OVS_ROOT}/include" "${OVS_ROOT}/include/windows"
   "${OVS_ROOT}/lib" "${OVS_ROOT}/datapath-windows/include"
-  "${OVS_GEN}/include" "${OVS_GEN}/lib"
+  "${OVS_GEN}" "${OVS_GEN}/include" "${OVS_GEN}/lib"
   "${PTHREADS_ROOT}/include" "${OPENSSL_ROOT}/include")
 set(OVN_DEFS HAVE_CONFIG_H _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS
              _WINSOCK_DEPRECATED_NO_WARNINGS)
@@ -138,3 +140,61 @@ function(ovn_setup t)
   target_compile_options(${t} PRIVATE /W1 /Zc:inline-)
 endfunction()
 ovn_setup(ovn)
+
+# --- OVN executables --------------------------------------------------------
+# The daemons (ovn-northd, ovn-controller) and the *ctl/appctl/trace utilities,
+# linked against libovn + the OVS CMake libraries.  These are the userspace
+# binaries the install/package step ships (the autotools build's bin_PROGRAMS).
+set(OVN_EXT_LIBDIRS "${OPENSSL_ROOT}/lib" "${OPENSSL_ROOT}/lib/VC/x64/MT"
+                    "${PTHREADS_ROOT}/lib")
+set(OVN_SYS_LIBS ws2_32 Shlwapi iphlpapi wbemuuid ole32 oleaut32)
+
+function(ovn_exe t)
+  ovn_setup(${t})
+  target_link_directories(${t} PRIVATE ${OVN_EXT_LIBDIRS})
+  # ovn + ovsdb + openvswitch covers every binary's LDADD (controller needs only
+  # ovn + openvswitch; the extra static ovsdb pulls nothing unreferenced).
+  target_link_libraries(${t} PRIVATE
+    ovn ovsdb openvswitch libssl libcrypto pthreadVC3 ${OVN_SYS_LIBS})
+endfunction()
+
+# ovn-controller: Windows has no netlink, so build the *-stub.c variants and drop
+# the HAVE_NETLINK sources (mirrors the automake `else` branch).  Controller test
+# programs (test-*.c) are not binaries we ship.
+file(GLOB OVN_CONTROLLER_SRC CONFIGURE_DEPENDS "${OVN_ROOT}/controller/*.c")
+list(FILTER OVN_CONTROLLER_SRC EXCLUDE REGEX
+  "/(test-lflow-cache|test-vif-plug|host-if-monitor|ovn-netlink-notifier|neighbor-exchange-netlink|neighbor-exchange|nexthop-exchange|route-exchange-netlink|route-exchange)\\.c$")
+add_executable(ovn-controller ${OVN_CONTROLLER_SRC})
+ovn_exe(ovn-controller)
+
+# ovn-northd: all of northd/ is portable; only the test driver is excluded.
+file(GLOB OVN_NORTHD_SRC CONFIGURE_DEPENDS "${OVN_ROOT}/northd/*.c")
+list(FILTER OVN_NORTHD_SRC EXCLUDE REGEX "/test-ipam\\.c$")
+add_executable(ovn-northd ${OVN_NORTHD_SRC})
+ovn_exe(ovn-northd)
+
+add_executable(ovn-nbctl utilities/ovn-dbctl.c utilities/ovn-nbctl.c)
+ovn_exe(ovn-nbctl)
+add_executable(ovn-sbctl utilities/ovn-dbctl.c utilities/ovn-sbctl.c)
+ovn_exe(ovn-sbctl)
+add_executable(ovn-trace utilities/ovn-trace.c)
+ovn_exe(ovn-trace)
+add_executable(ovn-appctl utilities/ovn-appctl.c)
+ovn_exe(ovn-appctl)
+
+# --- install (the C:/openvswitch/usr layout the packaging scripts consume) ---
+# Run with: cmake --install <build> --config Release --prefix C:/openvswitch/usr
+# Mirrors the autotools "make install" split: daemons -> sbin, tools -> bin,
+# schemas -> share/{openvswitch,ovn}.  Both OVN and the OVS subproject targets
+# are installed from here (cross-directory install(TARGETS), CMake >= 3.13) so the
+# OVS submodule overlay stays a pure build definition with no install rules.
+install(TARGETS ovn-controller ovn-northd ovn-nbctl ovn-sbctl ovn-trace ovn-appctl
+        RUNTIME DESTINATION bin)
+install(TARGETS ovs-vswitchd ovsdb-server RUNTIME DESTINATION sbin)
+install(TARGETS ovs-vsctl ovs-dpctl ovs-ofctl ovs-appctl ovsdb-tool ovsdb-client
+        RUNTIME DESTINATION bin)
+install(FILES "${OVN_ROOT}/ovn-nb.ovsschema" "${OVN_ROOT}/ovn-sb.ovsschema"
+        DESTINATION share/ovn)
+install(FILES "${OVS_ROOT}/vswitchd/vswitch.ovsschema"
+              "${OVS_ROOT}/ovsdb/local-config.ovsschema"
+        DESTINATION share/openvswitch)

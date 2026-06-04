@@ -21,7 +21,10 @@
 #include "ovn-netlink-notifier.h"
 #include "vec.h"
 
-static struct vector empty = VECTOR_EMPTY_INITIALIZER(uint8_t);
+/* Brace aggregate init rather than VECTOR_EMPTY_INITIALIZER's compound literal,
+ * which MSVC rejects as a non-constant file-scope initializer (C2099).
+ * Fields: buffer, len, esize, capacity (see struct vector in lib/vec.h). */
+static struct vector empty = { NULL, 0, sizeof(uint8_t), 0 };
 
 void
 ovn_netlink_update_notifier(enum ovn_netlink_notifier_type type OVS_UNUSED,
