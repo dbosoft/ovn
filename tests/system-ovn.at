@@ -4565,19 +4565,12 @@ check ovn-nbctl --wait=hv lr-lb-add lr0 lb2
 # Wait until udp service_monitor are set to offline.
 wait_row_count Service_Monitor 2 status=offline protocol=udp
 
-# We need to use "-k" argument because we keep receiving health check probes.
-NETNS_DAEMONIZE([sw0-p1], [nc -4 -k -l -u -p 53 -d 0.1 -c '/bin/cat'], [udp1.pid])
-NETNS_DAEMONIZE([sw0-p2], [nc -4 -k -l -u -p 53 -d 0.1 -c '/bin/cat'], [udp2.pid])
+# Start persistent UDP service that keeps replying to the health-check probes.
+NETNS_START_UDP_ECHO([sw0-p1], [4], [53], [udp1.pid])
+NETNS_START_UDP_ECHO([sw0-p2], [4], [53], [udp2.pid])
 
-# UDP nc with "-k" is bit tricky to cleanup, especially on test failures, due to its
-# child processes keeping the listening port open. If they are not cleaned up properly,
-# the whole test cleanup hangs.
 udp1_pid=$(cat udp1.pid)
 udp2_pid=$(cat udp2.pid)
-echo "pkill -P $udp1_pid && kill $udp1_pid" >> cleanup
-echo "pkill -P $udp2_pid && kill $udp2_pid" >> cleanup
-:> udp1.pid
-:> udp2.pid
 
 wait_row_count Service_Monitor 2 status=online
 
@@ -4764,19 +4757,12 @@ check ovn-nbctl --wait=hv lr-lb-add lr0 lb2
 # Wait until udp service_monitor are set to offline.
 wait_row_count Service_Monitor 2 status=offline protocol=udp
 
-# We need to use "-k" argument because we keep receiving health check probes.
-NETNS_DAEMONIZE([sw0-p1], [nc -6 -k -l -u -p 53 -d 0.1 -c '/bin/cat'], [udp1.pid])
-NETNS_DAEMONIZE([sw0-p2], [nc -6 -k -l -u -p 53 -d 0.1 -c '/bin/cat'], [udp2.pid])
+# Start persistent UDP service that keeps replying to the health-check probes.
+NETNS_START_UDP_ECHO([sw0-p1], [6], [53], [udp1.pid])
+NETNS_START_UDP_ECHO([sw0-p2], [6], [53], [udp2.pid])
 
-# UDP nc with "-k" is bit tricky to cleanup, especially on test failures, due to its
-# child processes keeping the listening port open. If they are not cleaned up properly,
-# the whole test cleanup hangs.
 udp1_pid=$(cat udp1.pid)
 udp2_pid=$(cat udp2.pid)
-echo "pkill -P $udp1_pid && kill $udp1_pid" >> cleanup
-echo "pkill -P $udp2_pid && kill $udp2_pid" >> cleanup
-:> udp1.pid
-:> udp2.pid
 
 wait_row_count Service_Monitor 2 status=online
 
@@ -20442,6 +20428,8 @@ AT_CHECK([ip route add 10.10.3.1 via 20.0.0.25 vrf vrf-$vni proto zebra])
 # Verify routes do not appear in SB database.
 wait_row_count Learned_Route 0
 
+check ovn-nbctl --wait=hv remove Logical_Router lr-tenant options dynamic-routing dynamic-routing-vrf-id
+
 check ovn-nbctl --wait=hv set Logical_Router lr-frr options:dynamic-routing-no-learning=false
 
 # Verify learned route appears in SB database
@@ -20517,6 +20505,44 @@ OVS_WAIT_FOR_OUTPUT([ovn-sbctl list Learned_Route | grep ip_prefix | sort], [0],
 ip_prefix           : "10.10.3.1"
 ip_prefix           : "10.10.4.1"
 ])
+
+# Verify that we can have one router read and another write from the same
+# vrf table.
+#
+# The router that advertises needs to have the gateway chassis set so remove the
+# redistribute routes from lr-frr.
+
+check ovn-nbctl remove Logical_Router lr-frr options \
+    dynamic-routing-redistribute
+check ovn-nbctl --wait=hv set Logical_Router lr-frr \
+    options:dynamic-routing-vrf-id=$vni
+
+check ovn-nbctl --wait=hv set Logical_Router lr-tenant \
+    options:dynamic-routing-vrf-id=$vni \
+    options:dynamic-routing=true \
+    options:dynamic-routing-redistribute=static \
+    options:dynamic-routing-no-learning=true
+
+# Verify that lr-frr has Learned_Routes but lr-tenant does not.
+dp_frr=$(fetch_column Datapath_Binding _uuid external_ids:name=lr-frr)
+dp_tenant=$(fetch_column Datapath_Binding _uuid external_ids:name=lr-tenant)
+wait_row_count Learned_Route 2 datapath=$dp_frr
+wait_row_count Learned_Route 0 datapath=$dp_tenant
+wait_row_count Advertised_Route 0 datapath=$dp_frr
+wait_row_count Advertised_Route 1 datapath=$dp_tenant
+OVN_ROUTE_EQUAL([vrf-$vni], [dnl
+blackhole 10.10.1.1 proto ovn metric 1000
+10.10.3.1 via 20.0.0.25 dev local-bgp-port proto zebra
+10.10.4.1 via 20.0.0.25 dev local-bgp-port proto zebra
+20.0.0.0/8 dev local-bgp-port proto kernel scope link src 20.0.0.4])
+OVS_WAIT_FOR_OUTPUT([ip route show table $vni type blackhole | wc -l], [0], [dnl
+1
+])
+
+check ovn-nbctl remove Logical_Router lr-tenant options \
+    dynamic-routing-vrf-id dynamic-routing \
+    dynamic-routing-redistribute \
+    dynamic-routing-no-learning
 
 # Remove lrp-local-bgp-port port.
 AS_BOX([$(date +%H:%M:%S.%03N) Remove lrp])

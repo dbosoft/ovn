@@ -42,7 +42,10 @@ m4_define([NS_CHECK_EXEC],
 #
 # Expands into the proper ovs-vsctl commands to create a bridge with the
 # appropriate type, and allows additional arguments to be passed.
-m4_define([ADD_BR], [ovs-vsctl _ADD_BR([$1]) -- $2])
+# A stable datapath-id derived from the bridge name is set.
+m4_define([ADD_BR],
+  [dpid=$(printf '%016x' $(echo '$1' | cksum | cut -d ' ' -f1))
+   ovs-vsctl _ADD_BR([$1]) -- set Bridge $1 other-config:datapath-id="$dpid" -- $2])
 
 # ADD_VETH([port], [namespace], [ovs-br], [ip_addr] [mac_addr], [gateway],
 #          [ip_addr_flags] [ip6_addr] [gateway6])
@@ -176,6 +179,27 @@ m4_define([NETNS_START_DHCPD],
         NETNS_START_TCPDUMP([$1], [-nni $2], [$1])
         NETNS_DAEMONIZE([$1], [dhcpd -6 -f -lf $DHCP_TEST_DIR/dhcpd.leases -cf $DHCP_TEST_DIR/dhcpd.conf $2 > dhcpd.log 2>&1], [dhcpd.pid])
     ]
+)
+
+# NETNS_START_UDP_ECHO([namespace], [ip-version], [port], [pidfile])
+#
+# Start a "persistent" UDP echo server within 'namespace', listening on 'port'
+# and echoing back any data it receives. 'ip-version' is either "4" or "6".
+# The server keeps running across multiple client connections (nc's "-k").
+#
+# nc's "-k" makes it fork child processes that keep the listening port open, so
+# killing only the parent leaves those children running and hangs the whole
+# test cleanup (especially on failures). This macro therefore installs a
+# cleanup hook that kills the child processes (pkill -P) before the parent.
+#
+# The parent PID is recorded in the 'pidfile' and the user can employ the same
+# (pkill -P && kill) technique to cleanly stop the server at will during the
+# test.
+#
+m4_define([NETNS_START_UDP_ECHO],
+   [ip netns exec $1 nc -$2 -k -l -u -p $3 -d 0.1 -c '/bin/cat' & echo $! > $4
+     echo "pkill -P \`cat $4\` && kill \`cat $4\`" >> cleanup
+   ]
 )
 
 # OVS_CHECK_CT_ZERO_SNAT()

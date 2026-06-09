@@ -209,6 +209,7 @@ Jarno Rajahalme                    jarno@ovn.org
 Jason Kölker                       jason@koelker.net
 Jason Wessel                       jason.wessel@windriver.com
 Jasper Capel                       jasper@capel.tv
+JayGue Lee                         enginrect@gmail.com
 Jean Tourrilhes                    jt@hpl.hp.com
 Jeremy Stribling
 Jeroen van Bemmel                  jvb127@gmail.com
@@ -262,7 +263,7 @@ Lorand Jakab                       lojakab@cisco.com
 Lorenzo Bianconi                   lorenzo.bianconi@redhat.com
 Luca Giraudo
 Lucas Alvares Gomes                lucasagomes@gmail.com
-Lucas Vargas Dias                  lucas.vdias@luizalabs.com
+Lucas Vargas Dias                  lucas.vdias@magalu.cloud
 Lucian Petrut                      lpetrut@cloudbasesolutions.com
 Luigi Rizzo                        rizzo@iet.unipi.it
 Luis E. P.                         l31g@hotmail.com
@@ -305,6 +306,7 @@ MJ Ponsonby                        mj.ponsonby@canonical.com
 Mohammad Heib                      mheib@redhat.com
 Moshe Levi                         moshele@mellanox.com
 Murphy McCauley                    murphy.mccauley@gmail.com
+Mykola Yurchenko                   myurchenko@nvidia.com
 Natasha Gude
 Neal Shrader                       neal@digitalocean.com
 Neil McKee                         neil.mckee@inmon.com

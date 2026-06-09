@@ -10666,6 +10666,15 @@ check_row_count Port_Binding 1 logical_port=c7 tag=$c5_tag
 check_row_count Port_Binding 1 logical_port=c5 tag=$c5_tag
 check_row_count Port_Binding 2 parent_port=parent2 tag=$c5_tag
 
+AS_BOX([clear tag_request for child port])
+AT_CHECK([ovn-nbctl --wait=sb lsp-add ls1 c8 parent2 42])
+AT_CHECK([ovn-nbctl lsp-get-tag c8], [0], [42
+])
+check_row_count Port_Binding 1 logical_port=c8 tag=42
+AT_CHECK([ovn-nbctl --wait=sb clear logical_switch_port c8 tag_request])
+AT_CHECK([ovn-nbctl lsp-get-tag c8], [0], [])
+check_column "" Port_Binding tag logical_port=c8
+
 AS_BOX([tag_request without parent_name])
 AT_CHECK([ovn-nbctl ls-add ls2])
 dnl When there is no parent_name provided (for say, 'localnet'), 'tag_request'
@@ -10684,6 +10693,17 @@ dnl change the tag_request.
 AT_CHECK([ovn-nbctl --wait=sb  set logical_switch_port local1 tag_request=50])
 AT_CHECK([ovn-nbctl lsp-get-tag local1], [0], [50
 ])
+dnl clear the tag_request.
+AT_CHECK([ovn-nbctl --wait=sb clear logical_switch_port local1 tag_request])
+AT_CHECK([ovn-nbctl lsp-get-tag local1], [0], [])
+check_column "" Port_Binding tag logical_port=local1
+dnl setting tag_request back to 0 should also clear a previously set tag.
+AT_CHECK([ovn-nbctl --wait=sb set logical_switch_port local1 tag_request=50])
+AT_CHECK([ovn-nbctl lsp-get-tag local1], [0], [50
+])
+AT_CHECK([ovn-nbctl --wait=sb set logical_switch_port local1 tag_request=0])
+AT_CHECK([ovn-nbctl lsp-get-tag local1], [0], [])
+check_column "" Port_Binding tag logical_port=local1
 
 OVN_CLEANUP_NORTHD
 AT_CLEANUP
@@ -21488,6 +21508,10 @@ grep controller | grep tp_src=546 | grep \
 check ovn-nbctl --wait=hv lsp-add-localnet-port ls1 ln-public phys
 
 ln_public_key=$(fetch_column Port_Binding tunnel_key logical_port=ln-public)
+# DHCP lflows for external ports now match on the external LSP's inport
+# (after the inport-rewrite at table 0), so the OF flow's reg14 value is
+# the external LSP's tunnel_key, not the localnet's.
+lp_ext1_key=$(fetch_column Port_Binding tunnel_key logical_port=ls1-lp_ext1)
 
 # The ls1-lp_ext1 should be bound to hv1 as only hv1 is part of the
 # ha chassis group.
@@ -21499,13 +21523,13 @@ wait_for_ports_up ls1-lp_ext1
 (ovn-sbctl dump-flows lr0; ovn-sbctl dump-flows ls1) > sbflows
 as hv1 ovs-ofctl dump-flows br-int > brintflows
 AT_CHECK([as hv1 ovs-ofctl dump-flows br-int | \
-grep controller | grep "0a.00.00.06" | grep reg14=0x$ln_public_key | \
+grep controller | grep "0a.00.00.06" | grep reg14=0x$lp_ext1_key | \
 wc -l], [0], [1
 ])
 AT_CHECK([as hv1 ovs-ofctl dump-flows br-int | \
 grep controller | grep tp_src=546 | grep \
 "ae.70.00.00.00.00.00.00.00.00.00.00.00.00.00.06" | \
-grep reg14=0x$ln_public_key | wc -l], [0], [1
+grep reg14=0x$lp_ext1_key | wc -l], [0], [1
 ])
 
 # There should be no DHCPv4/v6 flows for ls1-lp_ext1 on hv2
@@ -21749,15 +21773,16 @@ ovn-sbctl find port_binding logical_port=ls1-lp_ext1
 wait_row_count Port_Binding 1 logical_port=ls1-lp_ext1 chassis=$hv2_uuid
 wait_for_ports_up ls1-lp_ext1
 
-# There should be OF flows for DHCP4/v6 for the ls1-lp_ext1 port in hv2
+# There should be OF flows for DHCP4/v6 for the ls1-lp_ext1 port in hv2.
+# reg14 carries the external LSP's tunnel_key (after inport rewrite).
 AT_CHECK([as hv2 ovs-ofctl dump-flows br-int | \
-grep controller | grep "0a.00.00.06" | grep reg14=0x$ln_public_key | \
+grep controller | grep "0a.00.00.06" | grep reg14=0x$lp_ext1_key | \
 wc -l], [0], [1
 ])
 AT_CHECK([as hv2 ovs-ofctl dump-flows br-int | \
 grep controller | grep tp_src=546 | grep \
 "ae.70.00.00.00.00.00.00.00.00.00.00.00.00.00.06" | \
-grep reg14=0x$ln_public_key | wc -l], [0], [1
+grep reg14=0x$lp_ext1_key | wc -l], [0], [1
 ])
 
 # There should be no DHCPv4/v6 flows for ls1-lp_ext1 on hv1
@@ -21767,7 +21792,7 @@ grep controller | grep "0a.00.00.06" | wc -l], [0], [0
 AT_CHECK([as hv1 ovs-ofctl dump-flows br-int | \
 grep controller | grep tp_src=546 | grep \
 "ae.70.00.00.00.00.00.00.00.00.00.00.00.00.00.06" | \
-grep reg14=0x$ln_public_key | wc -l], [0], [0
+grep reg14=0x$lp_ext1_key | wc -l], [0], [0
 ])
 
 # Send DHCPDISCOVER again for hv1/ext1. The DHCP response should come from
@@ -41210,26 +41235,25 @@ wait_for_ports_up
 AT_CHECK([ovn-nbctl --wait=hv sync])
 
 send_dhcp_packet() {
-    src_mac=${1}
-    src_ip=${2}
-    dst_mac=${3}
-    dst_ip=${4}
-    op_code=${5}
-    msg_type=${6}
-    yiaddr=$7
-    giaddr=${8}
-    sid=${9}
-    iface=${10}
-    #echo "ARGS: ${1} ${2} ${3} ${4} ${5} ${6} ${7} ${8} ${9} ${10}"
+    local src_mac=${1}
+    local src_ip=${2}
+    local dst_mac=${3}
+    local dst_ip=${4}
+    local op_code=${5}
+    local msg_type=${6}
+    local yiaddr=$7
+    local giaddr=${8}
+    local sid=${9}
+    local iface=${10}
     echo "ARGS: $@"
     if [[ $op_code == "01" ]]; then
-        ip_len=0111
-        udp_len=00fd
-        src_port=0044
+        local ip_len=0111
+        local udp_len=00fd
+        local src_port=0044
     else
-        ip_len=011d
-        udp_len=0109
-        src_port=0043
+        local ip_len=011d
+        local udp_len=0109
+        local src_port=0043
     fi
     flags=0000
 
@@ -41277,16 +41301,23 @@ dhcp_relay_resp_table=$(ovn-debug lflow-stage-to-oftable lr_in_dhcp_relay_resp)
 # Send DHCP valid discovery
 src_mac="505400000010"
 src_ip=`ip_to_hex 0.0.0.0`
+src_ip2=`ip_to_hex 192.168.1.2`
 dst_mac="ffffffffffff"
 dst_ip=`ip_to_hex 255.255.255.255`
 yiaddr=`ip_to_hex 0.0.0.0`
 giaddr=`ip_to_hex 0.0.0.0`
 sid=$src_ip
+
 # send packet
 send_dhcp_packet $src_mac $src_ip $dst_mac $dst_ip 01 01 $yiaddr $giaddr $sid vif0
+send_dhcp_packet $src_mac $src_ip2 $dst_mac $dst_ip 01 01 $yiaddr $giaddr $sid vif0
 
+# The default set match ip4.src == {0.0.0.0, lrp_cidr} compiles to
+# two OF flows; only the 0.0.0.0 one sees the DISCOVER packet.
+# Sort for stable ordering.
 OVS_WAIT_FOR_OUTPUT([ovs-ofctl dump-flows br-int table=$dhcp_relay_req_table | grep -v NXST | grep 255.255.255.255 | grep resubmit |
 cut -d ' ' -f5-5 | sed "s/,//"], [0], [dnl
+n_packets=1
 n_packets=1
 ])
 
@@ -41295,9 +41326,11 @@ n_packets=1
 giaddr=`ip_to_hex 192.168.1.1`
 # send packet
 send_dhcp_packet $src_mac $src_ip $dst_mac $dst_ip 01 01 $yiaddr $giaddr $sid vif0
+send_dhcp_packet $src_mac $src_ip2 $dst_mac $dst_ip 01 01 $yiaddr $giaddr $sid vif0
 
 OVS_WAIT_FOR_OUTPUT([ovs-ofctl dump-flows br-int table=$dhcp_relay_req_table | grep -v NXST | grep 255.255.255.255 | grep drop |
 cut -d ' ' -f5-5 | sed "s/,//"], [0], [dnl
+n_packets=1
 n_packets=1
 ])
 

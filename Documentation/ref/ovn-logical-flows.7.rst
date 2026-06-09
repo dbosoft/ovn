@@ -43,6 +43,14 @@ Ingress table 0 contains these logical flows:
   want to prevent duplicate replies and advertisements. This is achieved by a
   rule with priority 80 that sets ``REGBIT_PORT_SEC_DROP" = 1; next;"``.
 
+- For each ``type=external`` logical port on a switch that has a localnet port,
+  a priority 75 flow matches on ``inport == <localnet_port> && eth.src ==
+  <external_mac>`` and applies ``flags.localnet = 1; inport = <external_lsp>;
+  next;``.  This rewrites ``inport`` from the localnet port to the external LSP
+  so that all downstream stages observe the correct logical inport for traffic
+  originating from the baremetal member.
+
+
 - For each (enabled) vtep logical port, a priority 70 flow is added which
   matches on all packets and applies the action ``next(pipeline=ingress,
   table=S_SWITCH_IN_L3_LKUP) = 1;`` to skip most stages of ingress pipeline and
@@ -1382,7 +1390,8 @@ This table implements switching behavior.  It contains these logical flows:
 
 - A priority-100 flow that forwards all DHCP broadcast packets coming from VIFs
   to the logical router port's MAC when DHCP relay is enabled on the logical
-  switch.
+  switch.  The ``ip4.src`` match is the set ``{0.0.0.0, lrp_cidr}``, where
+  ``lrp_cidr`` is the CIDR of the relay logical router port.
 
 - A priority-100 flow that matches ``reg8[23] == 1`` and does ``output`` action.
   This ensures that packets that got injected back into this table from egress
@@ -2194,9 +2203,10 @@ contains the following flows to implement very basic IP host functionality.
 - For each logical router port configured with DHCP relay the following
   priority-110 flows are added to manage the DHCP relay traffic:
 
-  - if ``inport`` is lrp and ``ip4.src == 0.0.0.0`` and ``ip4.dst ==
-    255.255.255.255`` and ``ip4.frag == 0`` and ``udp.src == 68`` and ``udp.dst
-    == 67``, the ``dhcp_relay_req_chk`` action is executed. ::
+  - if ``inport`` is lrp and ``ip4.src == {0.0.0.0, lrp_cidr}`` and ``ip4.dst
+    == 255.255.255.255`` and ``ip4.frag == 0`` and ``udp.src == 68`` and
+    ``udp.dst == 67``, the ``dhcp_relay_req_chk`` action is executed.
+    ``lrp_cidr`` is the CIDR of the relay logical router port. ::
 
         reg9[7] = dhcp_relay_req_chk(lrp_ip, dhcp_server_ip);next
 
@@ -2494,10 +2504,11 @@ This stage process the DHCP request packets on which ``dhcp_relay_req_chk``
 action is applied in the IP input stage.
 
 - A priority-100 logical flow is added for each logical router port configured
-  with DHCP relay that matches ``inport`` is lrp and ``ip4.src == 0.0.0.0`` and
-  ``ip4.dst == 255.255.255.255`` and ``udp.src == 68`` and ``udp.dst == 67`` and
-  ``reg9[7] == 1`` and applies following actions. If ``reg9[7]`` is set to 1
-  then, ``dhcp_relay_req_chk`` action was successful. ::
+  with DHCP relay that matches ``inport`` is lrp and ``ip4.src == {0.0.0.0,
+  lrp_cidr}`` and ``ip4.dst == 255.255.255.255`` and ``udp.src == 68`` and
+  ``udp.dst == 67`` and ``reg9[7] == 1`` and applies following actions. If
+  ``reg9[7]`` is set to 1 then, ``dhcp_relay_req_chk`` action was successful.
+  ``lrp_cidr`` is the CIDR of the relay logical router port. ::
 
       ip4.src=lrp ip;
       ip4.dst=dhcp server ip;
@@ -2505,10 +2516,11 @@ action is applied in the IP input stage.
       next;
 
 - A priority-1 logical flow is added for each logical router port configured
-  with DHCP relay that matches ``inport`` is lrp and ``ip4.src == 0.0.0.0`` and
-  ``ip4.dst == 255.255.255.255`` and ``udp.src == 68`` and ``udp.dst == 67`` and
-  ``reg9[7] == 0`` and drops the packet. If ``reg9[7]`` is set to 0 then,
-  ``dhcp_relay_req_chk`` action was unsuccessful.
+  with DHCP relay that matches ``inport`` is lrp and ``ip4.src == {0.0.0.0,
+  lrp_cidr}`` and ``ip4.dst == 255.255.255.255`` and ``udp.src == 68`` and
+  ``udp.dst == 67`` and ``reg9[7] == 0`` and drops the packet. If ``reg9[7]``
+  is set to 0 then, ``dhcp_relay_req_chk`` action was unsuccessful.
+  ``lrp_cidr`` is the CIDR of the relay logical router port.
 
 - A priority-0 flow that matches all packets to advance to the next table.
 
