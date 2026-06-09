@@ -167,6 +167,12 @@ list(FILTER OVN_CONTROLLER_SRC EXCLUDE REGEX
 add_executable(ovn-controller ${OVN_CONTROLLER_SRC})
 ovn_exe(ovn-controller)
 
+# Same controller sources minus main(), reused by ovntest so the controller
+# test drivers (test-lflow-cache, test-vif-plug) link against the identical
+# object set that ovn-controller links (guaranteed symbol resolution).
+set(OVN_CONTROLLER_TESTOBJ ${OVN_CONTROLLER_SRC})
+list(FILTER OVN_CONTROLLER_TESTOBJ EXCLUDE REGEX "/ovn-controller\\.c$")
+
 # ovn-northd: all of northd/ is portable; only the test driver is excluded.
 file(GLOB OVN_NORTHD_SRC CONFIGURE_DEPENDS "${OVN_ROOT}/northd/*.c")
 list(FILTER OVN_NORTHD_SRC EXCLUDE REGEX "/test-ipam\\.c$")
@@ -206,10 +212,10 @@ install(FILES "${OVS_ROOT}/vswitchd/vswitch.ovsschema"
 # clashing with the OVS subproject's own ovstest target.  The autotools autotest
 # suite (tests/*.at -> tests/testsuite) is not used on Windows.
 #
-# Only libovn-level modules are included.  The controller/northd test drivers
-# (controller/test-lflow-cache.c, controller/test-vif-plug.c, northd/test-ipam.c)
-# and the netlink test (tests/test-ovn-netlink.c, HAVE_NETLINK/Linux only) need
-# extra controller/northd objects or Linux netlink and are left out for now.
+# libovn-level modules plus the controller/northd test drivers, which link the
+# same controller sources as ovn-controller (OVN_CONTROLLER_TESTOBJ) plus
+# northd/ipam.c.  The netlink test (tests/test-ovn-netlink.c) stays out
+# (HAVE_NETLINK/Linux only).
 set(OVNTEST_SOURCES
   tests/ovstest.c
   tests/test-utils.c
@@ -218,8 +224,12 @@ set(OVNTEST_SOURCES
   tests/test-vector.c
   lib/test-lflow-conj-ids.c
   lib/test-ovn-features.c
-  lib/test-ofctrl-seqno.c)
-add_executable(ovntest ${OVNTEST_SOURCES})
+  lib/test-ofctrl-seqno.c
+  controller/test-lflow-cache.c
+  controller/test-vif-plug.c
+  northd/test-ipam.c
+  northd/ipam.c)
+add_executable(ovntest ${OVNTEST_SOURCES} ${OVN_CONTROLLER_TESTOBJ})
 ovn_exe(ovntest)
 
 # Configure-time drift guard: FATAL if an upstream-added tests/test-*.c registers
