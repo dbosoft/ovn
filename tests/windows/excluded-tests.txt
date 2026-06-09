@@ -1,0 +1,28 @@
+# Test GROUP TITLES (matched as a substring) skipped on Windows because the
+# FEATURE or TEST METHOD is genuinely not available there -- NOT because of an
+# OVN build bug.  REAL build bugs (see known-failures.md: the xxreg/xreg register
+# field-width bug and the ovn-nbctl mirror Index/Key integer bug) are
+# deliberately NOT listed here: they must run and FAIL until fixed.
+#
+# This list is curated from an observed run (tests/windows/baseline) and is meant
+# to grow only with method/feature incompatibilities, never to paper over bugs.
+
+# ovn-ic-nbctl / ovn-ic-sbctl (and ovn-ic) are not built by the CMake overlay
+# yet, so these tests fail with "command not found".  Re-enable once the ic
+# binaries are added to CMakeLists.txt.
+ovn-ic-nbctl
+ovn-ic-sbctl
+
+# These pause and resume ovn-northd with `kill -STOP` / `kill -CONT`
+# (SIGSTOP/SIGCONT) to drive incremental processing.  Windows has no
+# SIGSTOP/SIGCONT and the taskkill-based kill shim can only terminate a process,
+# so the pause/resume step exits non-zero and the test cannot run as written.
+Load balancer incremental processing - batched updates
+Added and Deleted Logical Switch
+LS/LSP add and delete
+ipam router ports - incremental processing
+port group segfault
+
+# Asserts a POSIX signal exit code (142 = 128 + SIGALRM) that Windows does not
+# produce (the daemon exits via WaitForMultipleObjects deadline instead).
+test unixctl

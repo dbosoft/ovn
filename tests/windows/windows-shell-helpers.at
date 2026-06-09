@@ -1,0 +1,66 @@
+dnl -*- autotest -*-
+dnl Windows test-harness shell shims for the dbosoft OVN Windows build-smoke suite.
+dnl
+dnl Mirrors ovs/tests/windows/windows-shell-helpers.at.  Keeps the upstream
+dnl tests/*.at bodies (and ovs-macros.at / ovn-macros.at / atlocal.in) UNCHANGED
+dnl -- resync cost on them stays 0.  tests/windows-testsuite.at m4_includes this
+dnl file once, after the macro libraries.
+dnl
+dnl They MUST go in the PREPARE_TESTS diversion (same as ovs-macros.at's own
+dnl helpers): ovs_init() there does `ovs_base=\`pwd\``, and OVS_RUNDIR/OVS_*DIR are
+dnl derived from it.  The pwd() shim below rewrites that to a Windows path (pwd -W)
+dnl so the native ovsdb-server.exe/ovn-northd.exe etc. can resolve
+dnl punix:$OVS_RUNDIR/... sockets and pidfiles.  At top level the shim would be
+dnl defined too late (wrong diversion) and ovs_init would capture an MSYS /c/...
+dnl path the native binaries reject with "listen failed: No such file or directory".
+m4_divert_push([PREPARE_TESTS])
+[
+# Detect Windows via the MSYS2-set $MSYSTEM (MSYS / MINGW64 / UCRT64 / ...), which
+# is reliable across MSYS2 flavors and versions.  `uname` / $MACHTYPE is NOT: modern
+# MSYS2 reports x86_64-pc-cygwin and uname strings vary by subsystem (see swig/cccl#20),
+# so the historical `case \`uname\` in MINGW*|MSYS*` check misfires.
+if test -n "$MSYSTEM"; then
+    IS_WIN32=yes
+else
+    IS_WIN32=no
+fi
+
+if test "$IS_WIN32" = "yes"; then
+    pwd () {
+        command pwd -W "$@"
+    }
+
+    diff () {
+        command diff --strip-trailing-cr "$@"
+    }
+
+    # tskill is more effective than taskkill but it isn't always installed.
+    if (tskill //?) >/dev/null 2>&1; then :; else
+        tskill () { taskkill //F //PID $1 >/dev/null; }
+    fi
+
+    kill () {
+        signal=
+        retval=0
+        for arg; do
+            arg=$(echo $arg | tr -d '\n\r')
+            case $arg in
+            -*) signal=$arg ;;
+            [1-9][0-9]*)
+                # tasklist always returns 0.
+                # If pid does exist, there will be a line with the pid.
+                if tasklist //fi "PID eq $arg" | grep $arg >/dev/null; then
+                    if test "X$signal" != "X-0"; then
+                        tskill $arg
+                    fi
+                else
+                    retval=1
+                fi
+                ;;
+            esac
+        done
+        return $retval
+    }
+fi
+]
+m4_divert_pop([PREPARE_TESTS])
