@@ -198,3 +198,52 @@ install(FILES "${OVN_ROOT}/ovn-nb.ovsschema" "${OVN_ROOT}/ovn-sb.ovsschema"
 install(FILES "${OVS_ROOT}/vswitchd/vswitch.ovsschema"
               "${OVS_ROOT}/ovsdb/local-config.ovsschema"
         DESTINATION share/openvswitch)
+
+# --- tests (CMake/CTest unit-test net; MSYS-free, no autotools "make check") --
+# Reuse OVN's C unit-test modules the way the OVS overlay does: compile the
+# OVSTEST_REGISTER modules that link against libovn into one multi-call binary
+# and drive them through CTest.  Named `ovntest` (not `ovstest`) to avoid
+# clashing with the OVS subproject's own ovstest target.  The autotools autotest
+# suite (tests/*.at -> tests/testsuite) is not used on Windows.
+#
+# Only libovn-level modules are included.  The controller/northd test drivers
+# (controller/test-lflow-cache.c, controller/test-vif-plug.c, northd/test-ipam.c)
+# and the netlink test (tests/test-ovn-netlink.c, HAVE_NETLINK/Linux only) need
+# extra controller/northd objects or Linux netlink and are left out for now.
+set(OVNTEST_SOURCES
+  tests/ovstest.c
+  tests/test-utils.c
+  tests/test-ovn.c
+  tests/test-sparse-array.c
+  tests/test-vector.c
+  lib/test-lflow-conj-ids.c
+  lib/test-ovn-features.c
+  lib/test-ofctrl-seqno.c)
+add_executable(ovntest ${OVNTEST_SOURCES})
+ovn_exe(ovntest)
+
+# Configure-time drift guard: FATAL if an upstream-added tests/test-*.c registers
+# an OVSTEST module but is missing from OVNTEST_SOURCES.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/check-ovntest-list.cmake)
+
+enable_testing()
+set(_ovntest_dll_path
+  "PATH=path_list_prepend:${PTHREADS_ROOT}/bin;PATH=path_list_prepend:${OPENSSL_ROOT}")
+
+# Self-contained modules (run all their own asserts; exit code is the verdict).
+set(OVNTEST_EXIT_CASES
+  "test-vector add"
+  "test-sparse-array add"
+  "test-ovn-features run")
+foreach(_case IN LISTS OVNTEST_EXIT_CASES)
+  separate_arguments(_argv UNIX_COMMAND "${_case}")
+  string(REPLACE " " "_" _tname "ovntest_${_case}")
+  add_test(NAME ${_tname} COMMAND ovntest ${_argv})
+  set_tests_properties(${_tname} PROPERTIES ENVIRONMENT_MODIFICATION "${_ovntest_dll_path}")
+endforeach()
+
+# /Zc:inline- registration canary: a stripped OVS_CONSTRUCTOR => empty module list.
+add_test(NAME ovntest-help COMMAND ovntest --help)
+set_tests_properties(ovntest-help PROPERTIES
+  PASS_REGULAR_EXPRESSION "test-ovn"
+  ENVIRONMENT_MODIFICATION "${_ovntest_dll_path}")

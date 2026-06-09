@@ -78,6 +78,13 @@ jobs:
         shell: cmd
         run: cmake --build build --config Release
 
+      # Run the CMake/CTest unit-test net (the ovntest multi-call harness over
+      # libovn's self-checking modules; the per-test PATH is set in CMakeLists so
+      # the pthreads/OpenSSL DLLs resolve).  MSYS-free; no autotools "make check".
+      - name: ctest
+        shell: cmd
+        run: ctest --test-dir build -C Release --output-on-failure
+
       # Install the userspace into the C:/openvswitch/usr layout the packaging
       # scripts expect: daemons in usr/sbin, tools in usr/bin, schemas in
       # usr/share/{openvswitch,ovn}.
