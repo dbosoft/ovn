@@ -66,6 +66,7 @@
 /testsuite
 /testsuite.dir/
 /testsuite.log
+/package.m4
 /test-lib
 /testsuite.tmp.orig
 /valgrind.[0-9]*

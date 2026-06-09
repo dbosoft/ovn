@@ -1,0 +1,7 @@
+# autotest KEYWORDS whose tests are skipped on Windows because they exercise a
+# feature with no Windows support.  Keep this minimal -- everything else must run
+# and be fixed, not skipped.
+#
+#   python - the OVS/OVN Python bindings have no Windows support (a separate
+#            track); the "- Python3" test variants exercise those bindings.
+python

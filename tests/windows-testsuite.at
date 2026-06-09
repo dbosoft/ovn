@@ -1,0 +1,47 @@
+AT_INIT
+
+m4_ifdef([AT_COLOR_TESTS], [AT_COLOR_TESTS])
+
+dnl ===========================================================================
+dnl  dbosoft OVN -- Windows autotest suite: the FULL upstream test set with the
+dnl  Windows harness shims layered in.  m4_includes UNCHANGED upstream .at bodies
+dnl  (resync cost 0) plus tests/windows/windows-shell-helpers.at (pwd -W so the
+dnl  native daemons resolve punix:$OVS_RUNDIR/... sockets).
+dnl
+dnl  Ordered userspace/logic-first (no real datapath needed -> likely to pass on
+dnl  Windows), with the datapath/integration-heavy suites (ovn.at, ovn-controller,
+dnl  ovn-ic, ipsec) LAST, so a -j1 sweep yields a meaningful pass count early.
+dnl  Run -j1; curate down via excluded-*.txt once the pass/fail map is known.
+dnl ===========================================================================
+
+m4_include([tests/ovs-macros.at])
+m4_include([tests/ovsdb-macros.at])
+m4_include([tests/ofproto-macros.at])
+m4_include([tests/ovn-macros.at])
+m4_include([tests/windows/windows-shell-helpers.at])
+m4_include([tests/network-functions.at])
+
+dnl ---- userspace / control-plane logic (no real datapath) ----
+m4_include([tests/ovn-features.at])
+m4_include([tests/ovn-lflow-cache.at])
+m4_include([tests/ovn-lflow-conj-ids.at])
+m4_include([tests/ovn-ofctrl-seqno.at])
+m4_include([tests/ovn-util.at])
+m4_include([tests/ovn-ipam.at])
+m4_include([tests/ovn-nbctl.at])
+m4_include([tests/ovn-sbctl.at])
+m4_include([tests/ovn-ic-nbctl.at])
+m4_include([tests/ovn-ic-sbctl.at])
+m4_include([tests/ovn-northd.at])
+m4_include([tests/ovn-inc-proc-graph-dump.at])
+m4_include([tests/ovn-br-controller.at])
+m4_include([tests/ovn-vif-plug.at])
+m4_include([tests/checkpatch.at])
+
+dnl ---- datapath / integration heavy (likely to need a real datapath) ----
+m4_include([tests/ovn.at])
+m4_include([tests/ovn-performance.at])
+m4_include([tests/ovn-controller.at])
+m4_include([tests/ovn-controller-vtep.at])
+m4_include([tests/ovn-ic.at])
+m4_include([tests/ovn-ipsec.at])
