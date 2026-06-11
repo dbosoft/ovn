@@ -1,65 +1,53 @@
-# OVN Windows test suite — known failures (real build bugs)
+# OVN Windows test suite — known failures
 
-These are **real OVN/MSVC build bugs** surfaced by the Windows autotest suite
-(`tests/windows/run-windows-testsuite.ps1`). They are deliberately **not** in
-`excluded-tests.txt`: the tests must keep running and failing until the bugs are
-fixed. Method/feature incompatibilities (which *are* excluded) live in
-`excluded-tests.txt` / `excluded-keywords.txt`.
+Re-baselined on the xxreg-fixed clean `ovs` head, with OVN built against an OVS
+that carries the binary-stdout fix (dbosoft/ovs#52). Real platform/method
+incompatibilities are skipped via `excluded-tests.txt` / `excluded-keywords.txt`,
+not listed here.
 
-Baseline run: userspace groups 1–371, **304 pass / 65 fail / 2 skip** (after the
-PKI + watchdog fixes; before excluding the method-incompatible tests). **NOTE:**
-that local baseline was contaminated by bug #1 below (a stale generated `.inc`
-in the local tree), which inflated the failure count; it must be re-measured on
-a clean build.
+The suite is **not** wired into CI as a gate. It splits into two very different
+populations:
 
-## 1. `xxreg`/`xreg` register field width wrong — RESOLVED (stale generated `.inc`, not an MSVC bug)
+- **Userspace / control-plane (the original groups 1–371): 65 → 14 failures.**
+  The drop came from three fixes: the stale-`.inc` guard (the `xxreg`/`xreg`
+  width corruption — see git history), the OVS UTF-8 argv manifest + this repo's
+  `cmake/windows-utf8.manifest` on the OVN exes, and OVS binary-mode stdout
+  (LF, not CRLF) which clears the `ovn-macros.at:992` NB→SB convergence checks
+  that compared `\r`-laden `ovn-sbctl/nbctl` output (122/132/170 now pass).
+- **Integration suites (`ovn.at`, `ovn-controller.at`, …, groups 372+):**
+  hundreds of scenarios that stand up northd + controller + ovsdb + a simulated
+  datapath together. These were ordered last and never part of the userspace
+  baseline; they are a separate, large Windows-porting effort (datapath
+  simulation, timing, parallelization) and are out of scope for this pass.
 
-The symptom: every test using an `xreg`/`xxreg` subfield logged
+## Dependency
 
+The CRLF clearance above requires OVS binary-stdout (dbosoft/ovs#52). OVN gets it
+by bumping the `ovs` submodule to a `dbosoft-main` that contains #52; until then
+the convergence/`ovn-sbctl`-dump comparisons fail on embedded `\r`.
+
+## Userspace residual (14) — categorized
+
+| Tests | Cause | Disposition |
+|---|---|---|
+| 41, 42 `ovn-nbctl mirrors`; 157 NB-SB mirrors sync | The `ovn-nbctl` mirror `Index/Key` integer bug: a 32-bit mirror index is sign-extended into the high 32 bits of a 64-bit value (`-4294967296` for `0`). MSVC integer-width/sign-extension. **Real OVN/MSVC bug.** | Fix (separate change). |
+| 100 SNI; 234 northd-parallelization unixctl; 256/258 LSP incremental; 259 SB pb incremental; 268 LR NAT incremental; 290 IGMP incremental (all `parallelization=yes`) | `ovs-macros.at:221` hard failures. These drive northd via `kill -STOP`/`-CONT` (SIGSTOP/SIGCONT) or unixctl pause, and several need `add-br`/`lsp-bind` against a datapath — neither method works for a Windows `--detach` daemon. Same family as the already-excluded incremental-processing tests. | Likely exclude (verify each is signal/datapath-bound, then add to excluded-tests.txt). |
+| 165, 166 tunnel ids exhaustion | `ovn-macros.at:944`. | Investigate. |
+| 353, 354 `ovn-br-controller` | `create` failure. | Investigate. |
+
+## Integration suites (sample)
+
+Not individually triaged. Note: the `ovn.at` expression/register tests
+(373 `registers`, 377 `expression parser`, …) show register→OXM/NXM **name**
+mismatches (e.g. `xxreg0 = OXM_OF_IP_ECN` vs expected `NXM_NX_XXREG0`). Real flow
+generation is correct (the convergence tests pass), so this is an OVS/OVN
+**test-expectation version difference** (the dbosoft OVS field set differs from
+what OVN's `ovn.at` was written against), not a build bug — it resolves with a
+coordinated OVS+OVN resync, not a Windows fix.
+
+## How to reproduce one test
+
+```powershell
+.\tests\windows\run-windows-testsuite.ps1 -BuildDir <build-cmake> -Groups '41'
+# detailed log: tests/testsuite.dir/<NNNN>/testsuite.log
 ```
-expr|WARN|xxreg0[64..127]: error parsing xreg0 subfield
-  (Cannot select bits 64 to 127 of 2-bit field xxreg0.)
-```
-
-`xxreg0` is **128-bit** and `xreg*` are **64-bit**, but they were reported as
-**2-/8-bit**, so the expr parser rejected the subfields and northd flow
-generation broke (~16 direct failures plus cascades).
-
-**Corrected root cause — not MSVC.** A prior in-source autotools build of the
-OVS submodule had left stale generated `ovs/lib/*.inc` (`meta-flow.inc`, …) on
-disk. A quoted `#include "meta-flow.inc"` from `ovs/lib/meta-flow.c` resolves the
-compiland's own directory before any `-I` path, so the stale in-source copy
-shadowed the freshly generated `gen/lib/meta-flow.inc`. The stale table had 183
-field entries against today's 211-id `MFF_N_IDS`; with positional initialization
-+ direct indexing (`mf_fields[id]`), every field whose enum position had shifted
-read the wrong slot, so `xxreg`/`xreg` landed on small fields and reported
-2-/8-bit. (OVN's `lib/logical-fields.c` registration was correct all along.)
-
-These `.inc` are `.gitignore`'d generated artifacts, so a **clean checkout (CI)
-was never affected** — this only bites a local tree that was once
-autotools-built. Fixed by removing the stale in-source `.inc`; a configure-time
-guard in the OVS CMake (`file(REMOVE …)`, dbosoft/ovs) prevents recurrence and
-reaches OVN on the next `ovs` submodule bump. Confirmed: after the removal +
-rebuild, `ovntest test-ovn parse-expr` normalizes `xxreg0[0..127]` → `xxreg0`
-and accepts `xxreg0[64..127]` with no error.
-
-## 2. `ovn-nbctl` mirror `Index/Key` integer bug
-
-`ovn-nbctl.at:493` (mirrors, direct + daemon). `mirror-list` prints:
-
-```
-Index/Key:  -4294967296      (expected 0)
-Index/Key:  -4294967295      (expected 1)
-```
-
-`-4294967296 = 0xFFFFFFFF00000000`: a 32-bit mirror index sign-extended into the
-high 32 bits of a 64-bit value when read from the OVSDB integer column / printed.
-MSVC integer-width/sign-extension bug.
-
-## Still to triage
-
-~37 failures (mostly `ovn-macros.at:992`/`:944` and `ovs-macros.at:221` macro
-"hard failure"s) were attributed to bug #1 (northd producing wrong/incomplete
-southbound data from the corrupted register widths). With #1 resolved, **the
-baseline must be re-measured on a clean build** — these cascades are expected to
-clear. Re-baseline before individually triaging any remainder.
