@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Make the process active code page UTF-8 (Windows 10 1903+) so the MSVC CRT
+     delivers argv[] as UTF-8 instead of re-encoding the command line through the
+     system ANSI code page (e.g. CP1252), which corrupts non-ASCII arguments
+     before they reach OVN/OVS (both treat argv as UTF-8). Mirrors the OVS
+     overlay's cmake/windows-utf8.manifest. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>

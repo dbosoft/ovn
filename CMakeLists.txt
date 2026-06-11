@@ -156,6 +156,10 @@ function(ovn_exe t)
   # ovn + openvswitch; the extra static ovsdb pulls nothing unreferenced).
   target_link_libraries(${t} PRIVATE
     ovn ovsdb openvswitch libssl libcrypto pthreadVC3 ${OVN_SYS_LIBS})
+  # Embed a UTF-8 active-code-page manifest so the CRT hands argv[] to OVN as
+  # UTF-8 rather than re-encoding it through the system ANSI code page (LF stdout
+  # comes from the linked OVS lib's ovs_set_program_name). MSVC adds it via mt.exe.
+  target_sources(${t} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows-utf8.manifest")
 endfunction()
 
 # ovn-controller: Windows has no netlink, so build the *-stub.c variants and drop
